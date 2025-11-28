@@ -8,11 +8,12 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::Ipv4Addr;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+
+use libc;
 
 use serde::{Deserialize, Serialize};
 
@@ -72,7 +73,9 @@ struct TunInfo {
     address: Ipv4Addr,
     #[allow(dead_code)]
     netmask: Ipv4Addr,
-    fd: i32,
+    // Store the actual device to keep it alive
+    #[allow(dead_code)]
+    device: tun::Device,
 }
 
 impl HelperState {
@@ -257,27 +260,22 @@ fn create_tun(state: &Arc<Mutex<HelperState>>, name: &str, address: &str, netmas
     config
         .address(addr)
         .netmask(mask)
-        .mtu(TUN_MTU)
+        .mtu(TUN_MTU as i32)
         .up();
 
     match tun::create(&config) {
         Ok(device) => {
             use tun::AbstractDevice;
             let actual_name = device.tun_name().unwrap_or_else(|_| name.to_string());
-            let fd = device.as_raw_fd();
 
-            log::info!("TUN device created: {} (fd: {})", actual_name, fd);
+            log::info!("TUN device created: {}", actual_name);
 
-            // Store device info (we keep the device alive by storing fd reference)
-            // Note: We're leaking the device here intentionally to keep it alive
-            // The fd will be closed when we destroy the TUN
-            std::mem::forget(device);
-
+            // Store the device to keep it alive
             let mut state = state.lock().unwrap();
             state.tun_devices.insert(actual_name.clone(), TunInfo {
                 address: addr,
                 netmask: mask,
-                fd,
+                device,
             });
 
             HelperResponse {
@@ -286,7 +284,6 @@ fn create_tun(state: &Arc<Mutex<HelperState>>, name: &str, address: &str, netmas
                 data: Some(serde_json::json!({
                     "name": actual_name,
                     "address": address,
-                    "fd": fd,
                 })),
             }
         }
@@ -305,11 +302,8 @@ fn destroy_tun(state: &Arc<Mutex<HelperState>>, name: &str) -> HelperResponse {
     log::info!("Destroying TUN device: {}", name);
 
     let mut state = state.lock().unwrap();
-    if let Some(info) = state.tun_devices.remove(name) {
-        // Close the file descriptor
-        unsafe {
-            libc::close(info.fd);
-        }
+    if state.tun_devices.remove(name).is_some() {
+        // Device is dropped here, which closes the TUN interface
         HelperResponse {
             success: true,
             message: format!("TUN device {} destroyed", name),
