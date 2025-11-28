@@ -261,6 +261,36 @@ impl ApiClient {
             .await
             .map_err(|e| format!("Failed to parse response: {}", e))
     }
+
+    pub async fn set_exit_node(
+        &self,
+        token: &str,
+        network_id: &str,
+        exit_type: &str,
+        exit_id: Option<&str>,
+    ) -> Result<(), String> {
+        let response = self
+            .client
+            .patch(format!(
+                "{}/api/mesh/networks/{}/exit-node",
+                self.base_url, network_id
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&serde_json::json!({
+                "exitNodeType": exit_type,
+                "exitNodeId": exit_id
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("Network error: {}", e))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(format!("Failed to set exit node: {}", error_text));
+        }
+
+        Ok(())
+    }
 }
 
 // Tauri commands
@@ -337,4 +367,16 @@ pub async fn auto_register_device(
     };
 
     state.api_client.auto_register_device(&token, &network_id, &device_name, platform).await
+}
+
+#[tauri::command]
+pub async fn set_exit_node(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    network_id: String,
+    exit_type: String,
+    exit_id: Option<String>,
+) -> Result<(), String> {
+    let token = crate::config::get_stored_token_internal(&app).await?;
+    state.api_client.set_exit_node(&token, &network_id, &exit_type, exit_id.as_deref()).await
 }

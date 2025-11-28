@@ -100,6 +100,7 @@ fn main() {
             api::get_device_config,
             api::get_relays,
             api::auto_register_device,
+            api::set_exit_node,
             config::store_token,
             config::get_stored_token,
             config::clear_stored_token,

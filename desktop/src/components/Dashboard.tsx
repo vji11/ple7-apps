@@ -385,9 +385,20 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
               >
                 {/* None option */}
                 <button
-                  onClick={() => {
+                  onClick={async () => {
                     setSelectedExitNode({ id: "none", name: "None (mesh only)", type: "none" });
                     setShowExitNodeSelect(false);
+                    if (selectedNetwork) {
+                      try {
+                        await invoke("set_exit_node", {
+                          networkId: selectedNetwork.id,
+                          exitType: "none",
+                          exitId: null,
+                        });
+                      } catch (err) {
+                        console.error("Failed to set exit node:", err);
+                      }
+                    }
                   }}
                   className="w-full flex items-center justify-between p-3 hover:bg-muted/50 transition-colors"
                 >
@@ -409,7 +420,7 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
                     {relays.map((relay) => (
                       <button
                         key={relay.id}
-                        onClick={() => {
+                        onClick={async () => {
                           setSelectedExitNode({
                             id: relay.id,
                             name: relay.location,
@@ -417,6 +428,18 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
                             countryCode: relay.country_code,
                           });
                           setShowExitNodeSelect(false);
+                          if (selectedNetwork) {
+                            try {
+                              // Setting relay as exit also changes mesh hub
+                              await invoke("set_exit_node", {
+                                networkId: selectedNetwork.id,
+                                exitType: "relay",
+                                exitId: relay.id,
+                              });
+                            } catch (err) {
+                              console.error("Failed to set exit node:", err);
+                            }
+                          }
                         }}
                         className="w-full flex items-center justify-between p-3 hover:bg-muted/50 transition-colors"
                       >
@@ -441,13 +464,24 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
                     {exitNodes.map((device) => (
                       <button
                         key={device.id}
-                        onClick={() => {
+                        onClick={async () => {
                           setSelectedExitNode({
                             id: device.id,
                             name: device.name,
                             type: "device",
                           });
                           setShowExitNodeSelect(false);
+                          if (selectedNetwork) {
+                            try {
+                              await invoke("set_exit_node", {
+                                networkId: selectedNetwork.id,
+                                exitType: "device",
+                                exitId: device.id,
+                              });
+                            } catch (err) {
+                              console.error("Failed to set exit node:", err);
+                            }
+                          }
                         }}
                         className="w-full flex items-center justify-between p-3 hover:bg-muted/50 transition-colors"
                       >
@@ -502,13 +536,16 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
         </motion.div>
       )}
 
-      {/* User Info & Version */}
+      {/* User Info */}
       <div className="mt-6 text-center text-sm text-muted-foreground">
         <p>{user.email}</p>
         <p className="text-xs mt-1 capitalize">{user.plan.toLowerCase()} Plan</p>
-        {appVersion && (
-          <p className="text-xs mt-2 text-muted-foreground/50">v{appVersion}</p>
-        )}
+      </div>
+
+      {/* Footer */}
+      <div className="mt-auto pt-6 text-center text-xs text-muted-foreground/50">
+        <p>&copy; 2025 PLE7. All rights reserved.</p>
+        {appVersion && <p className="mt-1">v{appVersion}</p>}
       </div>
     </div>
   );
