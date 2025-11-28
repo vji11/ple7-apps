@@ -195,22 +195,6 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
   const isConnected = connectionStatus === "connected";
   const isConnecting = connectionStatus === "connecting" || connectionStatus === "disconnecting";
 
-  // Build exit node options list
-  const exitNodeOptions: ExitNodeOption[] = [
-    { id: "none", name: "None (mesh only)", type: "none" },
-    ...relays.map(r => ({
-      id: r.id,
-      name: r.location,
-      type: "relay" as const,
-      countryCode: r.country_code,
-    })),
-    ...exitNodes.map(d => ({
-      id: d.id,
-      name: d.name,
-      type: "device" as const,
-    })),
-  ];
-
   return (
     <div className="min-h-screen p-4">
       {/* Header */}
