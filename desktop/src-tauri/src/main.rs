@@ -101,6 +101,23 @@ fn main() {
                 api_client,
             });
 
+            // Check for deep link URL in command line args (Windows startup case)
+            let args: Vec<String> = std::env::args().collect();
+            log_to_file(&format!("Startup args: {:?}", args));
+            for arg in args.iter().skip(1) {
+                if arg.starts_with("ple7://") {
+                    log_to_file(&format!("Deep link on startup: {}", arg));
+                    let url = arg.clone();
+                    let handle = app.handle().clone();
+                    // Emit after a short delay to ensure frontend is ready
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        let _ = handle.emit("deep-link", url);
+                    });
+                    break;
+                }
+            }
+
             log_to_file("App setup complete");
             Ok(())
         })
