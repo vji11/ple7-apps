@@ -1,0 +1,114 @@
+// Prevents additional console window on Windows in release
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod api;
+mod tunnel;
+mod config;
+mod stun;
+mod tun_device;
+mod wireguard;
+mod websocket;
+
+use std::sync::Arc;
+use std::io::Write;
+use std::fs::OpenOptions;
+use tauri::Manager;
+use tokio::sync::Mutex;
+use tunnel::{TunnelManager, AppState};
+
+fn get_log_path() -> std::path::PathBuf {
+    // Try to get the executable directory, fallback to current dir
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+        .join("ple7-debug.log")
+}
+
+fn log_to_file(msg: &str) {
+    let log_path = get_log_path();
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(file, "[{}] {}", timestamp, msg);
+    }
+}
+
+fn main() {
+    // Clear previous log
+    let log_path = get_log_path();
+    let _ = std::fs::write(&log_path, "");
+
+    // Set up panic hook to log panics to file
+    std::panic::set_hook(Box::new(|panic_info| {
+        let msg = format!("PANIC: {}", panic_info);
+        log_to_file(&msg);
+        eprintln!("{}", msg);
+    }));
+
+    log_to_file("=== PLE7 VPN Starting ===");
+    log_to_file(&format!("Log file: {:?}", log_path));
+    log_to_file(&format!("OS: {}", std::env::consts::OS));
+    log_to_file(&format!("Arch: {}", std::env::consts::ARCH));
+
+    // Initialize logging
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    log_to_file("env_logger initialized");
+    log::info!("Starting PLE7 VPN...");
+
+    log_to_file("Building Tauri app...");
+    let result = tauri::Builder::default()
+        .plugin(tauri_plugin_store::Builder::new().build())
+        .setup(|app| {
+            log_to_file("Setup callback started");
+
+            // Initialize app state
+            log_to_file("Creating TunnelManager...");
+            let tunnel_manager = Arc::new(Mutex::new(TunnelManager::new()));
+
+            log_to_file("Creating ApiClient...");
+            let api_client = api::ApiClient::new("https://ple7.com".to_string());
+
+            log_to_file("Managing AppState...");
+            app.manage(AppState {
+                tunnel_manager,
+                api_client,
+            });
+
+            log_to_file("App setup complete");
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            api::login,
+            api::get_networks,
+            api::get_devices,
+            api::get_device_config,
+            config::store_token,
+            config::get_stored_token,
+            config::clear_stored_token,
+            tunnel::connect_vpn,
+            tunnel::disconnect_vpn,
+            tunnel::get_connection_status,
+            tunnel::get_connection_stats,
+        ])
+        .run(tauri::generate_context!());
+
+    match result {
+        Ok(()) => {
+            log_to_file("Application exited normally");
+        }
+        Err(e) => {
+            let error_msg = format!("ERROR: Application failed: {}", e);
+            log_to_file(&error_msg);
+            log::error!("{}", error_msg);
+            eprintln!("{}", error_msg);
+        }
+    }
+}
