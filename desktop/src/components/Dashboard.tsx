@@ -23,12 +23,6 @@ import {
 } from "lucide-react";
 import PleiadesLogo from "./PleiadesLogo";
 
-interface User {
-  id: string;
-  email: string;
-  plan: string;
-}
-
 interface NetworkData {
   id: string;
   name: string;
@@ -64,7 +58,6 @@ interface ExitNodeOption {
 }
 
 interface DashboardProps {
-  user: User;
   onLogout: () => void;
 }
 
@@ -77,7 +70,7 @@ const countryToFlag = (code: string): string => {
   return String.fromCodePoint(...codePoints);
 };
 
-export default function Dashboard({ user, onLogout }: DashboardProps) {
+export default function Dashboard({ onLogout }: DashboardProps) {
   const [networks, setNetworks] = useState<NetworkData[]>([]);
   const [selectedNetwork, setSelectedNetwork] = useState<NetworkData | null>(null);
   const [relays, setRelays] = useState<Relay[]>([]);
