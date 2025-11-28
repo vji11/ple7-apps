@@ -72,6 +72,31 @@ jobs:
             iconutil -c icns icon.iconset -o icon.icns
           fi
 
+      - name: Import Apple certificate
+        if: matrix.platform == 'macos-latest'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          # Create temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+          # Decode certificate
+          echo "$APPLE_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/certificate.p12
+
+          # Create and configure keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          # Import certificate
+          security import $RUNNER_TEMP/certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+          # Allow codesign to access the keychain
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
       - name: Build macOS helper daemon
         if: matrix.platform == 'macos-latest'
         working-directory: desktop/src-tauri/helper
@@ -85,6 +110,19 @@ jobs:
             cargo build --release
             cp target/release/ple7-helper ../resources/
           fi
+
+      - name: Sign macOS helper daemon
+        if: matrix.platform == 'macos-latest'
+        run: |
+          # Sign the helper with hardened runtime and timestamp
+          codesign --sign "Developer ID Application: Valentin Jieanu (GP8P6Y7JPJ)" \
+            --options runtime \
+            --timestamp \
+            --force \
+            desktop/src-tauri/resources/ple7-helper
+
+          # Verify the signature
+          codesign --verify --verbose desktop/src-tauri/resources/ple7-helper
 
       - name: Copy helper plist to resources (macOS)
         if: matrix.platform == 'macos-latest'
