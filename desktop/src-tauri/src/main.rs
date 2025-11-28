@@ -88,6 +88,16 @@ fn main() {
         .setup(|app| {
             log_to_file("Setup callback started");
 
+            // Register deep link URL scheme at runtime (Windows/Linux)
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            {
+                log_to_file("Registering deep link URL scheme...");
+                match tauri_plugin_deep_link::register_all(app) {
+                    Ok(_) => log_to_file("Deep link URL scheme registered successfully"),
+                    Err(e) => log_to_file(&format!("Failed to register deep link: {}", e)),
+                }
+            }
+
             // Initialize app state
             log_to_file("Creating TunnelManager...");
             let tunnel_manager = Arc::new(Mutex::new(TunnelManager::new()));
