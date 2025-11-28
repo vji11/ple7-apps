@@ -78,6 +78,8 @@ jobs:
         if: matrix.platform == 'macos-latest'
         working-directory: desktop/src-tauri/helper
         run: |
+          # Create resources directory first
+          mkdir -p ../resources
           # Extract target from matrix args (e.g., --target aarch64-apple-darwin)
           TARGET=$(echo "${{ matrix.args }}" | grep -o '[a-z0-9_-]*-apple-darwin' || echo "")
           if [ -n "$TARGET" ]; then
