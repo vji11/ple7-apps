@@ -232,14 +232,13 @@ fn handle_command(cmd: HelperCommand, state: &Arc<Mutex<HelperState>>) -> Helper
 
 // macOS-specific utun creation using system socket
 fn create_utun() -> Result<(i32, String), String> {
+    use std::os::fd::RawFd;
+
     // Constants for macOS utun
-    const PF_SYSTEM: libc::c_int = 32;
-    const SOCK_DGRAM: libc::c_int = 2;
-    const SYSPROTO_CONTROL: libc::c_int = 2;
+    const PF_SYSTEM: i32 = 32;
+    const SOCK_DGRAM: i32 = 2;
+    const SYSPROTO_CONTROL: i32 = 2;
     const AF_SYS_CONTROL: u16 = 2;
-    // CTLIOCGINFO = _IOWR('N', 3, struct ctl_info)
-    // 'N' = 0x4e, sizeof(ctl_info) = 100 = 0x64
-    const CTLIOCGINFO: u64 = 0xc0644e03;
     const UTUN_CONTROL_NAME: &[u8] = b"com.apple.net.utun_control\0";
 
     #[repr(C)]
@@ -258,9 +257,12 @@ fn create_utun() -> Result<(i32, String), String> {
         sc_reserved: [u32; 5],
     }
 
+    // Define ioctl for CTLIOCGINFO using nix
+    nix::ioctl_readwrite!(ctliocginfo, b'N', 3, ctl_info);
+
     unsafe {
         // Create socket
-        let fd = libc::socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL);
+        let fd: RawFd = libc::socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL);
         if fd < 0 {
             return Err(format!("Failed to create socket: {}", std::io::Error::last_os_error()));
         }
@@ -272,9 +274,9 @@ fn create_utun() -> Result<(i32, String), String> {
         };
         info.ctl_name[..UTUN_CONTROL_NAME.len()].copy_from_slice(UTUN_CONTROL_NAME);
 
-        if libc::ioctl(fd, CTLIOCGINFO as libc::c_ulong, &mut info) < 0 {
+        if let Err(e) = ctliocginfo(fd, &mut info) {
             libc::close(fd);
-            return Err(format!("Failed to get control info: {}", std::io::Error::last_os_error()));
+            return Err(format!("Failed to get control info: {}", e));
         }
 
         // Try to find an available utun unit (start from 0)
