@@ -219,19 +219,10 @@ use linux::LinuxTun;
 mod macos {
     use super::*;
     use crate::helper_client::HelperClient;
-    use std::os::unix::net::UnixStream;
-    use std::io::{Read as IoRead, Write as IoWrite, BufRead, BufReader};
-    use std::fs::File;
-    use std::os::unix::io::{FromRawFd, RawFd};
-
-    const SOCKET_PATH: &str = "/var/run/ple7-helper.sock";
 
     pub struct MacOsTun {
         name: String,
         address: Ipv4Addr,
-        // We use a raw socket to read/write to utun created by helper
-        // The helper keeps the TUN alive, we just read/write via shared fd
-        tun_fd: Option<RawFd>,
     }
 
     impl MacOsTun {
@@ -311,7 +302,6 @@ mod macos {
             Ok(Self {
                 name: actual_name,
                 address,
-                tun_fd: None, // We'll implement packet I/O differently
             })
         }
 
