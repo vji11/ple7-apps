@@ -467,19 +467,6 @@ fn restore_default_gateway(state: &Arc<Mutex<HelperState>>) -> HelperResponse {
     }
 }
 
-// For getting the raw fd from tun device
-use std::os::unix::io::AsRawFd;
-
-trait DeviceExt {
-    fn as_raw_fd(&self) -> i32;
-}
-
-impl DeviceExt for tun::Device {
-    fn as_raw_fd(&self) -> i32 {
-        use std::os::fd::AsRawFd;
-        AsRawFd::as_raw_fd(self)
-    }
-}
-
 // Permissions helper for Unix
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
