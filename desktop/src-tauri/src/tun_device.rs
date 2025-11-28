@@ -218,7 +218,7 @@ use linux::LinuxTun;
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
-    use crate::helper_client::HelperClient;
+    use ple7_desktop_lib::helper_client::HelperClient;
 
     pub struct MacOsTun {
         name: String,
