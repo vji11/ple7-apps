@@ -540,16 +540,23 @@ pub fn parse_wg_config(config_str: &str) -> Result<WgConfig, String> {
                     if let Some(ref mut peer) = current_peer {
                         for ip_range in value.split(',') {
                             let ip_range = ip_range.trim();
+                            // Skip IPv6 addresses (contain colons)
+                            if ip_range.contains(':') {
+                                continue;
+                            }
                             let (addr, prefix) = if ip_range.contains('/') {
                                 let parts: Vec<&str> = ip_range.split('/').collect();
-                                let addr = parts[0].parse::<Ipv4Addr>()
-                                    .map_err(|e| format!("Invalid IP: {}", e))?;
-                                let prefix = parts[1].parse::<u8>()
-                                    .map_err(|e| format!("Invalid prefix: {}", e))?;
+                                let addr = match parts[0].parse::<Ipv4Addr>() {
+                                    Ok(a) => a,
+                                    Err(_) => continue, // Skip invalid addresses
+                                };
+                                let prefix = parts[1].parse::<u8>().unwrap_or(32);
                                 (addr, prefix)
                             } else {
-                                (ip_range.parse::<Ipv4Addr>()
-                                    .map_err(|e| format!("Invalid IP: {}", e))?, 32)
+                                match ip_range.parse::<Ipv4Addr>() {
+                                    Ok(addr) => (addr, 32),
+                                    Err(_) => continue, // Skip invalid addresses
+                                }
                             };
                             peer.allowed_ips.push((addr, prefix));
                         }
