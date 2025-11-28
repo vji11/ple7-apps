@@ -7,4 +7,7 @@ pub mod tun_device;
 pub mod wireguard;
 pub mod websocket;
 
+#[cfg(target_os = "macos")]
+pub mod helper_client;
+
 pub use tunnel::AppState;

@@ -1,0 +1,4 @@
+#!/bin/bash
+# Placeholder - real binary built by GitHub Actions
+echo "This is a placeholder. Run the GitHub Actions build to get the real binary."
+exit 1

@@ -70,6 +70,26 @@ jobs:
             iconutil -c icns icon.iconset -o icon.icns
           fi
 
+      - name: Build macOS helper daemon
+        if: matrix.platform == 'macos-latest'
+        working-directory: desktop/src-tauri/helper
+        run: |
+          # Extract target from matrix args (e.g., --target aarch64-apple-darwin)
+          TARGET=$(echo "${{ matrix.args }}" | grep -o '[a-z0-9_-]*-apple-darwin' || echo "")
+          if [ -n "$TARGET" ]; then
+            cargo build --release --target $TARGET
+            cp target/$TARGET/release/ple7-helper ../resources/
+          else
+            cargo build --release
+            cp target/release/ple7-helper ../resources/
+          fi
+
+      - name: Copy helper plist to resources (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          mkdir -p desktop/src-tauri/resources
+          cp desktop/src-tauri/helper/com.ple7.vpn.helper.plist desktop/src-tauri/resources/
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:

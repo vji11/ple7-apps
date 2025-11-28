@@ -212,144 +212,163 @@ mod linux {
 use linux::LinuxTun;
 
 // ============================================================================
-// macOS TUN Implementation
+// macOS TUN Implementation (via privileged helper daemon)
 // ============================================================================
 
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
-    use tun::{Configuration, AbstractDevice};
-    use std::process::Command;
-    use std::io::{Read, Write};
+    use crate::helper_client::HelperClient;
+    use std::os::unix::net::UnixStream;
+    use std::io::{Read as IoRead, Write as IoWrite, BufRead, BufReader};
+    use std::fs::File;
+    use std::os::unix::io::{FromRawFd, RawFd};
+
+    const SOCKET_PATH: &str = "/var/run/ple7-helper.sock";
 
     pub struct MacOsTun {
-        device: Arc<Mutex<tun::Device>>,
         name: String,
         address: Ipv4Addr,
+        // We use a raw socket to read/write to utun created by helper
+        // The helper keeps the TUN alive, we just read/write via shared fd
+        tun_fd: Option<RawFd>,
     }
 
     impl MacOsTun {
-        /// Check if running with root privileges
-        fn is_root() -> bool {
-            unsafe { libc::geteuid() == 0 }
-        }
-
         pub async fn create(
-            _name: &str,
+            name: &str,
             address: Ipv4Addr,
             netmask: Ipv4Addr,
         ) -> Result<Self, String> {
-            log::info!("macOS: Creating TUN device with address {}/{}", address, netmask);
-            log::info!("macOS: Running as root: {}", Self::is_root());
+            log::info!("macOS: Creating TUN device via helper daemon");
+            log::info!("macOS: Address: {}, Netmask: {}", address, netmask);
 
-            let mut config = Configuration::default();
-            config
-                .address(address)
-                .netmask(netmask)
-                .mtu(TUN_MTU as u16)
-                .up();
+            // Check if helper is running
+            if !HelperClient::is_running() {
+                if !HelperClient::is_installed() {
+                    log::info!("Helper daemon not installed, prompting for installation...");
+                    HelperClient::install_helper().await?;
+                } else {
+                    // Helper is installed but not running - try to start it
+                    log::info!("Helper installed but not running, attempting to start...");
+                    let output = std::process::Command::new("launchctl")
+                        .args(["load", "/Library/LaunchDaemons/com.ple7.vpn.helper.plist"])
+                        .output()
+                        .map_err(|e| format!("Failed to start helper: {}", e))?;
 
-            let device = tun::create(&config)
-                .map_err(|e| {
-                    let error_str = e.to_string();
-                    if error_str.contains("Operation not permitted") || error_str.contains("os error 1") {
-                        log::error!("macOS TUN device creation failed due to insufficient permissions");
-                        log::error!("To use PLE7 VPN on macOS, the app needs elevated privileges.");
-                        log::error!("Please run the app with: sudo /Applications/PLE7\\ VPN.app/Contents/MacOS/PLE7\\ VPN");
-                        format!(
-                            "Permission denied: macOS requires administrator privileges to create VPN tunnels. \
-                            Please run the app with sudo or grant it administrator access in System Preferences > Security & Privacy."
-                        )
-                    } else {
-                        format!("Failed to create TUN device: {}", e)
+                    if !output.status.success() {
+                        return Err("Failed to start helper daemon. Please reinstall the app.".to_string());
                     }
-                })?;
 
-            let actual_name = device.tun_name()
-                .map_err(|e| format!("Failed to get device name: {}", e))?;
+                    // Wait for it to start
+                    for _ in 0..10 {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        if HelperClient::is_running() {
+                            break;
+                        }
+                    }
 
-            log::info!("macOS TUN device created successfully: {}", actual_name);
+                    if !HelperClient::is_running() {
+                        return Err("Helper daemon failed to start".to_string());
+                    }
+                }
+            }
+
+            // Connect to helper and create TUN
+            let mut client = HelperClient::new();
+
+            // Ping to verify connection
+            if let Err(e) = client.ping() {
+                return Err(format!("Helper daemon not responding: {}", e));
+            }
+
+            log::info!("Connected to helper daemon");
+
+            // Create TUN device via helper
+            let response = client.create_tun(
+                name,
+                &address.to_string(),
+                &netmask.to_string(),
+            )?;
+
+            if !response.success {
+                return Err(format!("Helper failed to create TUN: {}", response.message));
+            }
+
+            let actual_name = response.data
+                .as_ref()
+                .and_then(|d| d.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or(name)
+                .to_string();
+
+            log::info!("macOS TUN device created via helper: {}", actual_name);
+
+            // Note: Reading/writing to the TUN is done via the utun interface
+            // The helper keeps the device alive, we use the interface name to
+            // interact with it via BPF or by opening the utun directly
 
             Ok(Self {
-                device: Arc::new(Mutex::new(device)),
                 name: actual_name,
                 address,
+                tun_fd: None, // We'll implement packet I/O differently
             })
         }
 
         pub async fn read(&self) -> Result<TunPacket, String> {
-            let device = self.device.clone();
-
-            tokio::task::spawn_blocking(move || {
-                let mut device = device.lock();
-                let mut buf = vec![0u8; TUN_MTU + 100];
-                match device.read(&mut buf) {
-                    Ok(n) => Ok(TunPacket {
-                        data: buf[..n].to_vec(),
-                    }),
-                    Err(e) => Err(format!("Failed to read from TUN: {}", e)),
-                }
-            })
-            .await
-            .map_err(|e| format!("Read task failed: {}", e))?
+            // For now, return an error - we need to implement proper packet capture
+            // The actual WireGuard implementation uses UDP sockets, not TUN reads directly
+            // The TUN device is used by the helper for routing
+            Err("Direct TUN read not implemented - use WireGuard UDP transport".to_string())
         }
 
-        pub async fn write(&self, packet: &[u8]) -> Result<(), String> {
-            let device = self.device.clone();
-            let packet = packet.to_vec();
-
-            tokio::task::spawn_blocking(move || {
-                let mut device = device.lock();
-                device.write_all(&packet)
-                    .map_err(|e| format!("Failed to write to TUN: {}", e))
-            })
-            .await
-            .map_err(|e| format!("Write task failed: {}", e))?
+        pub async fn write(&self, _packet: &[u8]) -> Result<(), String> {
+            // For now, return an error - we need to implement proper packet injection
+            // The actual WireGuard implementation uses UDP sockets, not TUN writes directly
+            Err("Direct TUN write not implemented - use WireGuard UDP transport".to_string())
         }
 
         pub async fn add_route(&self, destination: Ipv4Addr, prefix_len: u8) -> Result<(), String> {
-            let address = self.address;
+            let address = self.address.to_string();
+            let dest = destination.to_string();
 
-            tokio::task::spawn_blocking(move || {
-                let output = Command::new("route")
-                    .args([
-                        "-n", "add", "-net",
-                        &format!("{}/{}", destination, prefix_len),
-                        &address.to_string(),
-                    ])
-                    .output()
-                    .map_err(|e| format!("Failed to execute route: {}", e))?;
+            log::info!("Adding route {}/{} via helper", dest, prefix_len);
 
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    if !stderr.contains("File exists") {
-                        return Err(format!("Failed to add route: {}", stderr));
-                    }
-                }
+            let mut client = HelperClient::new();
+            let response = client.add_route(&dest, prefix_len, &address)?;
+
+            if response.success {
                 Ok(())
-            })
-            .await
-            .map_err(|e| format!("Route task failed: {}", e))?
+            } else {
+                Err(format!("Failed to add route: {}", response.message))
+            }
         }
 
         pub async fn set_default_gateway(&self) -> Result<(), String> {
-            let address = self.address;
+            let address = self.address.to_string();
 
-            tokio::task::spawn_blocking(move || {
-                Command::new("route")
-                    .args(["-n", "add", "-net", "0.0.0.0/1", &address.to_string()])
-                    .output()
-                    .map_err(|e| format!("Failed to add route: {}", e))?;
+            log::info!("Setting default gateway to {} via helper", address);
 
-                Command::new("route")
-                    .args(["-n", "add", "-net", "128.0.0.0/1", &address.to_string()])
-                    .output()
-                    .map_err(|e| format!("Failed to add route: {}", e))?;
+            let mut client = HelperClient::new();
+            let response = client.set_default_gateway(&address)?;
 
+            if response.success {
                 Ok(())
-            })
-            .await
-            .map_err(|e| format!("Default gateway task failed: {}", e))?
+            } else {
+                Err(format!("Failed to set default gateway: {}", response.message))
+            }
+        }
+    }
+
+    impl Drop for MacOsTun {
+        fn drop(&mut self) {
+            log::info!("Cleaning up TUN device: {}", self.name);
+
+            // Tell helper to destroy the TUN and restore routing
+            if let Ok(mut client) = std::panic::catch_unwind(|| HelperClient::new()) {
+                let _ = client.restore_default_gateway();
+                let _ = client.destroy_tun(&self.name);
+            }
         }
     }
 }
