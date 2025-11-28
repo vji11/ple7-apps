@@ -268,7 +268,7 @@ fn create_utun() -> Result<(i32, String), String> {
         // Create PF_SYSTEM socket
         let fd = libc::socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL);
         if fd < 0 {
-            return Err(format!("Failed to create socket: errno {}", *libc::__error()));
+            return Err(format!("Failed to create socket: {}", std::io::Error::last_os_error()));
         }
 
         // Prepare ctl_info with utun control name
@@ -282,9 +282,9 @@ fn create_utun() -> Result<(i32, String), String> {
         // Get the control ID
         let ret = libc::ioctl(fd, CTLIOCGINFO, &mut info as *mut CtlInfo);
         if ret < 0 {
-            let errno = *libc::__error();
+            let err = std::io::Error::last_os_error();
             libc::close(fd);
-            return Err(format!("Failed to get utun control ID: errno {}", errno));
+            return Err(format!("Failed to get utun control ID: {}", err));
         }
 
         log::info!("Got utun control ID: {}", info.ctl_id);
