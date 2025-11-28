@@ -197,10 +197,19 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
 
       setConnectedDevice(device);
 
-      // Connect VPN
+      // Set exit node on backend (triggers relay VRF/WG configuration)
       const exitNodeType = selectedExitNode?.type || "none";
       const exitNodeId = selectedExitNode?.type !== "none" ? selectedExitNode?.id : null;
-      addLog(`Connecting VPN with device ${device.id}, exit: ${exitNodeType}${exitNodeId ? ` (${exitNodeId})` : ''}...`);
+      addLog(`Setting exit node: ${exitNodeType}${exitNodeId ? ` (${exitNodeId})` : ''}...`);
+      await invoke("set_exit_node", {
+        networkId: selectedNetwork.id,
+        exitType: exitNodeType,
+        exitId: exitNodeId,
+      });
+      addLog("Exit node configured on relay");
+
+      // Connect VPN
+      addLog(`Connecting VPN with device ${device.id}...`);
       await invoke("connect_vpn", {
         deviceId: device.id,
         networkId: selectedNetwork.id,
@@ -221,6 +230,21 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
     setConnectionStatus("disconnecting");
     try {
       await invoke("disconnect_vpn");
+
+      // Clear exit node on backend (triggers relay VRF/WG cleanup)
+      if (selectedNetwork) {
+        try {
+          await invoke("set_exit_node", {
+            networkId: selectedNetwork.id,
+            exitType: "none",
+            exitId: null,
+          });
+        } catch (e) {
+          // Don't fail disconnect if exit node clear fails
+          console.warn("Failed to clear exit node:", e);
+        }
+      }
+
       setConnectionStatus("disconnected");
       setConnectedDevice(null);
     } catch (err: any) {

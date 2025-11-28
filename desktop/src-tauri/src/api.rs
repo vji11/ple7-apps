@@ -277,8 +277,8 @@ impl ApiClient {
             ))
             .header("Authorization", format!("Bearer {}", token))
             .json(&serde_json::json!({
-                "exitNodeType": exit_type,
-                "exitNodeId": exit_id
+                "type": exit_type,
+                "id": exit_id
             }))
             .send()
             .await
