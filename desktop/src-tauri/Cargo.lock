@@ -3314,7 +3314,7 @@ checksum = "6f21de1852251c849a53467e0ce8b97cca9d11fd4efa3930145c5d5f02f24447"
 
 [[package]]
 name = "ple7-desktop"
-version = "0.3.9"
+version = "0.3.33"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3328,6 +3328,7 @@ dependencies = [
  "futures-util",
  "image",
  "ipnet",
+ "libc",
  "log",
  "nix 0.29.0",
  "parking_lot",

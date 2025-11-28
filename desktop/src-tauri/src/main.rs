@@ -9,6 +9,9 @@ mod tun_device;
 mod wireguard;
 mod websocket;
 
+#[cfg(target_os = "macos")]
+mod helper_client;
+
 use std::sync::Arc;
 use std::io::Write;
 use std::fs::OpenOptions;
