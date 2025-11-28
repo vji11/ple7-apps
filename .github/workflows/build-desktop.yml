@@ -89,7 +89,7 @@ jobs:
             ## Download PLE7 Desktop App
 
             Choose the installer for your operating system:
-            - **Windows**: Download the `.msi` file
+            - **Windows**: Download the `.exe` installer
             - **macOS (Apple Silicon M1/M2/M3)**: Download the `aarch64.dmg` file (signed & notarized)
             - **macOS (Intel)**: Download the `x64.dmg` file (signed & notarized)
             - **Linux**: Download the `.deb` (Debian/Ubuntu) or `.AppImage` (universal)

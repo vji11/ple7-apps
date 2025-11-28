@@ -73,6 +73,7 @@ fn main() {
     log_to_file("Building Tauri app...");
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             log_to_file("Setup callback started");
 

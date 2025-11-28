@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Network,
@@ -58,9 +59,11 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
   const [showDeviceSelect, setShowDeviceSelect] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [appVersion, setAppVersion] = useState("");
 
   useEffect(() => {
     loadNetworks();
+    getVersion().then(setAppVersion).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -97,11 +100,14 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
   };
 
   const handleConnect = async () => {
-    if (!selectedDevice) return;
+    if (!selectedDevice || !selectedNetwork) return;
 
     setConnectionStatus("connecting");
     try {
-      await invoke("connect_vpn", { deviceId: selectedDevice.id });
+      await invoke("connect_vpn", {
+        deviceId: selectedDevice.id,
+        networkId: selectedNetwork.id
+      });
       setConnectionStatus("connected");
     } catch (err: any) {
       setError(err.toString());
@@ -357,10 +363,13 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
         </motion.div>
       )}
 
-      {/* User Info */}
+      {/* User Info & Version */}
       <div className="mt-6 text-center text-sm text-muted-foreground">
         <p>{user.email}</p>
         <p className="text-xs mt-1 capitalize">{user.plan.toLowerCase()} Plan</p>
+        {appVersion && (
+          <p className="text-xs mt-2 text-muted-foreground/50">v{appVersion}</p>
+        )}
       </div>
     </div>
   );
