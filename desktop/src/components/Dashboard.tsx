@@ -606,16 +606,10 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
         </motion.div>
       )}
 
-      {/* User Info */}
-      <div className="mt-6 text-center text-sm text-muted-foreground">
-        <p>{user.email}</p>
-        <p className="text-xs mt-1 capitalize">{user.plan.toLowerCase()} Plan</p>
-      </div>
-
       {/* Footer */}
-      <div className="mt-auto pt-6 text-center text-xs text-muted-foreground/50">
-        <p>&copy; 2025 PLE7. All rights reserved.</p>
-        {appVersion && <p className="mt-1">v{appVersion}</p>}
+      <div className="mt-auto pt-4 pb-2 text-center text-xs text-muted-foreground/50">
+        {appVersion && <p>v{appVersion}</p>}
+        <p>&copy; 2025 PLE7</p>
       </div>
 
       {/* Logs Modal */}
