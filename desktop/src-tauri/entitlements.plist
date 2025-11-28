@@ -10,21 +10,11 @@
     <key>com.apple.security.network.server</key>
     <true/>
 
-    <!-- Allow packet tunnel provider (VPN) - requires Apple Developer approval -->
-    <key>com.apple.developer.networking.networkextension</key>
-    <array>
-        <string>packet-tunnel-provider</string>
-    </array>
-
-    <!-- Allow system extension (for TUN device) - requires Apple Developer approval -->
-    <key>com.apple.developer.system-extension.install</key>
-    <true/>
-
-    <!-- App Sandbox must be disabled for TUN access -->
+    <!-- App Sandbox disabled for utun device access -->
     <key>com.apple.security.app-sandbox</key>
     <false/>
 
-    <!-- Hardened Runtime exceptions -->
+    <!-- Hardened Runtime exceptions for boringtun userspace WireGuard -->
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
     <true/>
 
