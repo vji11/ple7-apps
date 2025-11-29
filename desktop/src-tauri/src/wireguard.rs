@@ -261,7 +261,10 @@ impl WgTunnel {
             }).await;
 
             let (buf, len, src_addr) = match result {
-                Ok(Ok(data)) => data,
+                Ok(Ok(data)) => {
+                    log::debug!("[WG] UDP received {} bytes from {}", data.1, data.2);
+                    data
+                },
                 Ok(Err(e)) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
                 Ok(Err(e)) if e.kind() == std::io::ErrorKind::TimedOut => continue,
                 Ok(Err(e)) => {
@@ -284,26 +287,31 @@ impl WgTunnel {
 
                     match peer_state.tunnel.decapsulate(None, &buf[..len], &mut dst) {
                         TunnResult::WriteToTunnelV4(data, _) => {
+                            log::info!("[WG] Decrypted IPv4 packet: {} bytes, writing to TUN", data.len());
                             peer_state.rx_bytes += data.len() as u64;
                             peer_state.endpoint = Some(src_addr);
                             result_data = Some(data.to_vec());
                             break;
                         }
                         TunnResult::WriteToTunnelV6(data, _) => {
+                            log::info!("[WG] Decrypted IPv6 packet: {} bytes, writing to TUN", data.len());
                             peer_state.rx_bytes += data.len() as u64;
                             peer_state.endpoint = Some(src_addr);
                             result_data = Some(data.to_vec());
                             break;
                         }
                         TunnResult::WriteToNetwork(data) => {
+                            log::debug!("[WG] Sending {} bytes response to {}", data.len(), src_addr);
                             if let Err(e) = socket.send_to(data, src_addr) {
                                 log::error!("Failed to send response: {}", e);
                             }
                         }
                         TunnResult::Done => {
+                            log::info!("[WG] Handshake completed with peer");
                             peer_state.last_handshake = Some(Instant::now());
                         }
-                        TunnResult::Err(_e) => {
+                        TunnResult::Err(e) => {
+                            log::debug!("[WG] Decapsulate error: {:?}", e);
                             continue;
                         }
                     }
@@ -313,8 +321,9 @@ impl WgTunnel {
 
             // Now do async I/O outside the lock
             if let Some(data) = write_data {
-                if let Err(e) = tun.write(&data).await {
-                    log::error!("Failed to write to TUN: {}", e);
+                match tun.write(&data).await {
+                    Ok(_) => log::info!("[WG] TUN write success: {} bytes", data.len()),
+                    Err(e) => log::error!("[WG] TUN write FAILED: {}", e),
                 }
             }
         }
@@ -338,7 +347,9 @@ impl WgTunnel {
             let packet = match tun.read().await {
                 Ok(p) => p,
                 Err(e) => {
-                    if running.load(Ordering::SeqCst) {
+                    // Only log non-timeout errors
+                    let err_str = e.to_string();
+                    if running.load(Ordering::SeqCst) && !err_str.contains("timeout") && !err_str.contains("timed out") {
                         log::error!("TUN read error: {}", e);
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
