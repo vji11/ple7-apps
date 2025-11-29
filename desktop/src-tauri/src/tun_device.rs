@@ -435,32 +435,38 @@ mod windows {
         fn load_wintun() -> Result<wintun::Wintun, String> {
             // Try to get the executable directory
             if let Ok(exe_path) = std::env::current_exe() {
-                if let Some(exe_dir) = exe_path.parent() {
-                    // Try resources directory (where Tauri puts bundled resources)
-                    let resources_dll = exe_dir.join("wintun.dll");
-                    log::info!("Looking for wintun.dll at: {:?}", resources_dll);
-                    if resources_dll.exists() {
-                        log::info!("Found wintun.dll in resources directory");
-                        return unsafe { wintun::load_from_path(&resources_dll) }
-                            .map_err(|e| format!("Failed to load wintun.dll from resources: {}", e));
-                    }
+                log::info!("Executable path: {:?}", exe_path);
 
-                    // Try one level up (in case exe is in a subdirectory)
-                    if let Some(parent_dir) = exe_dir.parent() {
-                        let parent_dll = parent_dir.join("wintun.dll");
-                        if parent_dll.exists() {
-                            log::info!("Found wintun.dll in parent directory");
-                            return unsafe { wintun::load_from_path(&parent_dll) }
-                                .map_err(|e| format!("Failed to load wintun.dll from parent: {}", e));
+                if let Some(exe_dir) = exe_path.parent() {
+                    // Locations to try in order of preference
+                    let locations = vec![
+                        exe_dir.join("wintun.dll"),
+                        exe_dir.join("resources").join("wintun.dll"),
+                        exe_dir.join("_up_").join("wintun.dll"),
+                        exe_dir.parent().map(|p| p.join("wintun.dll")).unwrap_or_default(),
+                        exe_dir.parent().map(|p| p.join("resources").join("wintun.dll")).unwrap_or_default(),
+                    ];
+
+                    for dll_path in &locations {
+                        if dll_path.as_os_str().is_empty() {
+                            continue;
+                        }
+                        log::info!("Looking for wintun.dll at: {:?}", dll_path);
+                        if dll_path.exists() {
+                            log::info!("Found wintun.dll at: {:?}", dll_path);
+                            return unsafe { wintun::load_from_path(dll_path) }
+                                .map_err(|e| format!("Failed to load wintun.dll from {:?}: {}", dll_path, e));
                         }
                     }
+
+                    log::warn!("wintun.dll not found in any expected location");
                 }
             }
 
             // Fall back to default loading (current directory, system directories)
-            log::info!("Trying default wintun.dll load locations");
+            log::info!("Trying default wintun.dll load locations (system PATH)");
             unsafe { wintun::load() }
-                .map_err(|e| format!("Failed to load wintun.dll: {}. Make sure wintun.dll is installed.", e))
+                .map_err(|e| format!("Failed to load wintun.dll: {}. Please ensure wintun.dll is in the app directory or download from https://www.wintun.net", e))
         }
 
         pub async fn create(
@@ -471,13 +477,44 @@ mod windows {
             // Find wintun.dll - check multiple locations
             let wintun = Self::load_wintun()?;
 
+            // First, try to delete any stale adapter from previous session
+            log::info!("Checking for stale adapter '{}'...", name);
+            match Adapter::open(&wintun, name) {
+                Ok(old_adapter) => {
+                    log::info!("Found existing adapter, dropping it first...");
+                    drop(old_adapter);
+                    // Give Windows time to clean up
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                Err(_) => {
+                    log::info!("No existing adapter found");
+                }
+            }
+
             // Create or open adapter (returns Arc<Adapter>)
+            log::info!("Creating new Wintun adapter '{}' in pool '{}'...", name, WINTUN_POOL);
             let adapter = match Adapter::create(&wintun, WINTUN_POOL, name, None) {
-                Ok(adapter) => adapter,
+                Ok(adapter) => {
+                    log::info!("Wintun adapter created successfully");
+                    adapter
+                }
                 Err(e) => {
-                    log::warn!("Failed to create adapter, trying to open existing: {}", e);
-                    Adapter::open(&wintun, name)
-                        .map_err(|e| format!("Failed to open adapter: {}", e))?
+                    log::warn!("Failed to create adapter: {}. Trying to open existing...", e);
+                    // If create fails, try to open existing (might be from a previous session)
+                    match Adapter::open(&wintun, name) {
+                        Ok(adapter) => {
+                            log::info!("Opened existing Wintun adapter");
+                            adapter
+                        }
+                        Err(e2) => {
+                            return Err(format!(
+                                "Failed to create or open Wintun adapter. \
+                                Create error: {}. Open error: {}. \
+                                Please ensure you're running as Administrator and no other VPN is using Wintun.",
+                                e, e2
+                            ));
+                        }
+                    }
                 }
             };
 
