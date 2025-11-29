@@ -256,43 +256,60 @@ mod macos {
             log::info!("macOS: Creating TUN device via helper daemon");
             log::info!("macOS: Address: {}, Netmask: {}", address, netmask);
 
-            // Check if helper is running
-            if !HelperClient::is_running() {
-                if !HelperClient::is_installed() {
-                    log::info!("Helper daemon not installed, prompting for installation...");
-                    HelperClient::install_helper().await?;
-                } else {
-                    // Helper is installed but not running - try to start it
-                    log::info!("Helper installed but not running, attempting to start...");
+            // Try to connect to helper - if it fails, we need to (re)install
+            let mut client = HelperClient::new();
+            let helper_responsive = client.ping().is_ok();
+
+            if !helper_responsive {
+                log::info!("Helper daemon not responding, checking installation status...");
+
+                // Clean up stale socket if it exists
+                if HelperClient::is_running() {
+                    log::info!("Stale socket found, will reinstall helper");
+                }
+
+                if HelperClient::is_installed() {
+                    // Helper files exist but not responding - try to restart first
+                    log::info!("Helper installed but not responding, attempting to restart...");
+
+                    // Unload first (ignore errors)
+                    let _ = std::process::Command::new("launchctl")
+                        .args(["unload", "/Library/LaunchDaemons/com.ple7.vpn.helper.plist"])
+                        .output();
+
+                    // Try to load
                     let output = std::process::Command::new("launchctl")
                         .args(["load", "/Library/LaunchDaemons/com.ple7.vpn.helper.plist"])
-                        .output()
-                        .map_err(|e| format!("Failed to start helper: {}", e))?;
-
-                    if !output.status.success() {
-                        return Err("Failed to start helper daemon. Please reinstall the app.".to_string());
-                    }
+                        .output();
 
                     // Wait for it to start
+                    let mut started = false;
                     for _ in 0..10 {
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        if HelperClient::is_running() {
+                        let mut test_client = HelperClient::new();
+                        if test_client.ping().is_ok() {
+                            started = true;
                             break;
                         }
                     }
 
-                    if !HelperClient::is_running() {
-                        return Err("Helper daemon failed to start".to_string());
+                    if !started {
+                        // Restart failed, need full reinstall
+                        log::info!("Restart failed, performing full reinstall...");
+                        HelperClient::install_helper().await?;
                     }
+                } else {
+                    // Helper not installed at all
+                    log::info!("Helper daemon not installed, prompting for installation...");
+                    HelperClient::install_helper().await?;
                 }
-            }
 
-            // Connect to helper and create TUN
-            let mut client = HelperClient::new();
-
-            // Ping to verify connection
-            if let Err(e) = client.ping() {
-                return Err(format!("Helper daemon not responding: {}", e));
+                // Verify helper is now working
+                let mut verify_client = HelperClient::new();
+                if let Err(e) = verify_client.ping() {
+                    return Err(format!("Helper installation failed - please try again or restart your Mac: {}", e));
+                }
+                client = verify_client;
             }
 
             log::info!("Connected to helper daemon");
