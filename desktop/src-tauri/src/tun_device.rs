@@ -395,11 +395,21 @@ mod macos {
         fn drop(&mut self) {
             log::info!("Cleaning up TUN device: {}", self.name);
 
-            // Tell helper to destroy the TUN and restore routing
-            if let Ok(mut client) = std::panic::catch_unwind(|| HelperClient::new()) {
-                let _ = client.restore_default_gateway();
-                let _ = client.destroy_tun(&self.name);
-            }
+            // Spawn cleanup in a separate thread with timeout to avoid blocking
+            let name = self.name.clone();
+            std::thread::spawn(move || {
+                // Use short timeout (2s) to prevent hanging
+                let timeout = std::time::Duration::from_secs(2);
+                if let Ok(mut client) = std::panic::catch_unwind(|| HelperClient::new()) {
+                    if client.connect_with_timeout(timeout).is_ok() {
+                        let _ = client.restore_default_gateway();
+                        let _ = client.destroy_tun(&name);
+                        log::info!("TUN device {} cleaned up successfully", name);
+                    } else {
+                        log::warn!("Could not connect to helper for cleanup, TUN may persist");
+                    }
+                }
+            });
         }
     }
 }

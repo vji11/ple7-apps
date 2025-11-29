@@ -3314,7 +3314,7 @@ checksum = "6f21de1852251c849a53467e0ce8b97cca9d11fd4efa3930145c5d5f02f24447"
 
 [[package]]
 name = "ple7-desktop"
-version = "0.3.33"
+version = "0.3.50"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3351,6 +3351,7 @@ dependencies = [
  "tokio-util",
  "tun",
  "windows 0.58.0",
+ "winresource",
  "wintun",
  "x25519-dalek",
 ]
@@ -6419,6 +6420,16 @@ checksum = "cb5a765337c50e9ec252c2069be9bf91c7df47afb103b642ba3a53bf8101be97"
 dependencies = [
  "cfg-if",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "winresource"
+version = "0.1.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1ef04dd590e94ff7431a8eda99d5ca659e688d60e930bd0a330062acea4608f"
+dependencies = [
+ "toml 0.9.8",
+ "version_check",
 ]
 
 [[package]]

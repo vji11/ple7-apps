@@ -184,18 +184,43 @@ echo 'Helper installed successfully'
         }
     }
 
-    /// Connect to the helper daemon
+    /// Connect to the helper daemon with timeout
     pub fn connect(&mut self) -> Result<(), String> {
+        self.connect_with_timeout(Duration::from_secs(5))
+    }
+
+    /// Connect to the helper daemon with a custom timeout
+    pub fn connect_with_timeout(&mut self, timeout: Duration) -> Result<(), String> {
         if self.stream.is_some() {
             return Ok(());
         }
 
-        let stream = UnixStream::connect(SOCKET_PATH)
-            .map_err(|e| format!("Failed to connect to helper: {}", e))?;
+        // Use a timeout for connecting to avoid hanging indefinitely
+        let socket_path = std::path::Path::new(SOCKET_PATH);
+        if !socket_path.exists() {
+            return Err("Helper socket does not exist".to_string());
+        }
 
-        stream.set_read_timeout(Some(Duration::from_secs(10)))
+        // Connect with timeout using channel
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = UnixStream::connect(SOCKET_PATH);
+            let _ = tx.send(result);
+        });
+
+        let stream = match rx.recv_timeout(timeout) {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => return Err(format!("Failed to connect to helper: {}", e)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                return Err("Connection to helper timed out".to_string());
+            }
+            Err(_) => return Err("Helper connection failed".to_string()),
+        };
+
+        // Use shorter timeouts for read/write (2 seconds)
+        stream.set_read_timeout(Some(Duration::from_secs(2)))
             .map_err(|e| format!("Failed to set read timeout: {}", e))?;
-        stream.set_write_timeout(Some(Duration::from_secs(10)))
+        stream.set_write_timeout(Some(Duration::from_secs(2)))
             .map_err(|e| format!("Failed to set write timeout: {}", e))?;
 
         self.stream = Some(stream);
