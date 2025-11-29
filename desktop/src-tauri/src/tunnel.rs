@@ -343,6 +343,17 @@ pub async fn connect_vpn(
     exit_node_id: Option<String>,
 ) -> Result<(), String> {
     log::info!("========== VPN CONNECTION START ==========");
+
+    // Windows: Check if running as Administrator
+    #[cfg(target_os = "windows")]
+    {
+        if !is_running_as_admin() {
+            log::error!("Not running as Administrator!");
+            return Err("Administrator privileges required. Please right-click the app and select 'Run as administrator', or reinstall the app.".to_string());
+        }
+        log::info!("[ADMIN] ✓ Running as Administrator");
+    }
+
     log::info!("[STEP 1/6] connect_vpn command: device={}, network={}", device_id, network_id);
     log::info!("[STEP 1/6] Exit node: type={:?}, id={:?}", exit_node_type, exit_node_id);
     log::info!("[STEP 1/6] API base URL: {}", state.api_client.base_url);
@@ -539,4 +550,20 @@ pub struct PeerConfig {
     pub endpoint: Option<String>,
     pub allowed_ips: Vec<String>,
     pub persistent_keepalive: Option<u16>,
+}
+
+// ============================================================================
+// Windows Admin Check
+// ============================================================================
+
+/// Check if running as Administrator on Windows
+#[cfg(target_os = "windows")]
+fn is_running_as_admin() -> bool {
+    use std::process::Command;
+
+    // Use 'net session' command - it fails if not running as admin
+    match Command::new("net").args(["session"]).output() {
+        Ok(output) => output.status.success(),
+        Err(_) => false,
+    }
 }
