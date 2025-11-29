@@ -81,8 +81,9 @@ impl TunDevice {
     }
 
     /// Set the default gateway (for exit node functionality)
-    pub async fn set_default_gateway(&self) -> Result<(), String> {
-        self.inner.set_default_gateway().await
+    /// exclude_ip: Optional IP to exclude from VPN routing (e.g., relay endpoint to prevent routing loop)
+    pub async fn set_default_gateway(&self, exclude_ip: Option<&str>) -> Result<(), String> {
+        self.inner.set_default_gateway(exclude_ip).await
     }
 }
 
@@ -185,10 +186,31 @@ mod linux {
             .map_err(|e| format!("Route task failed: {}", e))?
         }
 
-        pub async fn set_default_gateway(&self) -> Result<(), String> {
+        pub async fn set_default_gateway(&self, exclude_ip: Option<&str>) -> Result<(), String> {
             let name = self.name.clone();
+            let exclude = exclude_ip.map(|s| s.to_string());
 
             tokio::task::spawn_blocking(move || {
+                // Get original default gateway for bypass route
+                if let Some(ref ip) = exclude {
+                    // Get current default gateway
+                    let output = Command::new("ip")
+                        .args(["route", "show", "default"])
+                        .output()
+                        .map_err(|e| format!("Failed to get default route: {}", e))?;
+
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    // Parse "default via X.X.X.X dev ..."
+                    if let Some(gw) = stdout.split_whitespace().skip_while(|&s| s != "via").nth(1) {
+                        // Add bypass route for relay endpoint
+                        log::info!("Adding bypass route for {} via {}", ip, gw);
+                        Command::new("ip")
+                            .args(["route", "add", ip, "via", gw])
+                            .output()
+                            .ok(); // Ignore errors (may already exist)
+                    }
+                }
+
                 // Add split routes for default gateway
                 Command::new("ip")
                     .args(["route", "add", "0.0.0.0/1", "dev", &name])
@@ -350,13 +372,16 @@ mod macos {
             }
         }
 
-        pub async fn set_default_gateway(&self) -> Result<(), String> {
+        pub async fn set_default_gateway(&self, exclude_ip: Option<&str>) -> Result<(), String> {
             let address = self.address.to_string();
 
             log::info!("Setting default gateway to {} via helper", address);
+            if let Some(ip) = exclude_ip {
+                log::info!("Excluding {} from VPN routing (bypass route)", ip);
+            }
 
             let mut client = HelperClient::new();
-            let response = client.set_default_gateway(&address)?;
+            let response = client.set_default_gateway(&address, exclude_ip)?;
 
             if response.success {
                 Ok(())
@@ -555,11 +580,40 @@ mod windows {
             .map_err(|e| format!("Route task failed: {}", e))?
         }
 
-        pub async fn set_default_gateway(&self) -> Result<(), String> {
+        pub async fn set_default_gateway(&self, exclude_ip: Option<&str>) -> Result<(), String> {
             let address = self.address;
+            let exclude = exclude_ip.map(|s| s.to_string());
 
             tokio::task::spawn_blocking(move || {
                 use std::process::Command;
+
+                // Add bypass route for excluded IP via default gateway
+                if let Some(ref ip) = exclude {
+                    // Get current default gateway using route print
+                    let output = Command::new("route")
+                        .args(["print", "0.0.0.0"])
+                        .output()
+                        .map_err(|e| format!("Failed to get routes: {}", e))?;
+
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    // Parse route output to find default gateway (look for 0.0.0.0 ... gateway)
+                    for line in stdout.lines() {
+                        if line.contains("0.0.0.0") && !line.contains("On-link") {
+                            let parts: Vec<&str> = line.split_whitespace().collect();
+                            if parts.len() >= 3 {
+                                let gw = parts[2];
+                                if gw.parse::<std::net::Ipv4Addr>().is_ok() {
+                                    log::info!("Adding bypass route for {} via {}", ip, gw);
+                                    Command::new("route")
+                                        .args(["add", ip, "mask", "255.255.255.255", gw])
+                                        .output()
+                                        .ok(); // Ignore errors (may already exist)
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
 
                 Command::new("route")
                     .args(["add", "0.0.0.0", "mask", "128.0.0.0", &address.to_string()])

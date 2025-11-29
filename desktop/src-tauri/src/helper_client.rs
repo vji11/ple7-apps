@@ -44,6 +44,8 @@ pub enum HelperCommand {
     #[serde(rename = "set_default_gateway")]
     SetDefaultGateway {
         gateway: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exclude_ip: Option<String>,
     },
     #[serde(rename = "restore_default_gateway")]
     RestoreDefaultGateway,
@@ -249,9 +251,11 @@ echo 'Helper installed successfully'
     }
 
     /// Set default gateway for exit node
-    pub fn set_default_gateway(&mut self, gateway: &str) -> Result<HelperResponse, String> {
+    /// exclude_ip: Optional IP to exclude from VPN routing (e.g., relay endpoint)
+    pub fn set_default_gateway(&mut self, gateway: &str, exclude_ip: Option<&str>) -> Result<HelperResponse, String> {
         self.send_command(HelperCommand::SetDefaultGateway {
             gateway: gateway.to_string(),
+            exclude_ip: exclude_ip.map(|s| s.to_string()),
         })
     }
 

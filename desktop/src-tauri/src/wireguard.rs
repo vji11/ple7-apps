@@ -454,7 +454,17 @@ impl WgTunnel {
     /// Set default gateway to route all traffic through VPN
     pub async fn set_default_gateway(&self) -> Result<(), String> {
         log::info!("Setting default gateway through VPN tunnel");
-        self.tun_device.set_default_gateway().await
+
+        // Get the relay endpoint IP to exclude from VPN routing (prevents routing loop)
+        let exclude_ip = self.config.peers.first()
+            .and_then(|peer| peer.endpoint)
+            .map(|endpoint| endpoint.ip().to_string());
+
+        if let Some(ref ip) = exclude_ip {
+            log::info!("Excluding relay endpoint {} from VPN routing", ip);
+        }
+
+        self.tun_device.set_default_gateway(exclude_ip.as_deref()).await
     }
 }
 

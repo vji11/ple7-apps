@@ -44,6 +44,9 @@ enum HelperCommand {
     #[serde(rename = "set_default_gateway")]
     SetDefaultGateway {
         gateway: String,
+        /// IP address to exclude from VPN routing (e.g., relay endpoint)
+        #[serde(default)]
+        exclude_ip: Option<String>,
     },
     #[serde(rename = "restore_default_gateway")]
     RestoreDefaultGateway,
@@ -97,6 +100,8 @@ struct HelperResponse {
 struct HelperState {
     tun_devices: HashMap<String, TunInfo>,
     original_gateway: Option<String>,
+    /// IP that was excluded from VPN routing (needs to be cleaned up on restore)
+    excluded_ip: Option<String>,
 }
 
 struct TunInfo {
@@ -112,6 +117,7 @@ impl HelperState {
         Self {
             tun_devices: HashMap::new(),
             original_gateway: None,
+            excluded_ip: None,
         }
     }
 }
@@ -253,8 +259,8 @@ fn handle_command(cmd: HelperCommand, state: &Arc<Mutex<HelperState>>) -> Helper
             remove_route(&destination, prefix_len)
         }
 
-        HelperCommand::SetDefaultGateway { gateway } => {
-            set_default_gateway(state, &gateway)
+        HelperCommand::SetDefaultGateway { gateway, exclude_ip } => {
+            set_default_gateway(state, &gateway, exclude_ip.as_deref())
         }
 
         HelperCommand::RestoreDefaultGateway => {
@@ -542,10 +548,14 @@ fn remove_route(destination: &str, prefix_len: u8) -> HelperResponse {
     }
 }
 
-fn set_default_gateway(state: &Arc<Mutex<HelperState>>, gateway: &str) -> HelperResponse {
+fn set_default_gateway(state: &Arc<Mutex<HelperState>>, gateway: &str, exclude_ip: Option<&str>) -> HelperResponse {
     log::info!("Setting default gateway to: {}", gateway);
+    if let Some(ip) = exclude_ip {
+        log::info!("Excluding IP from VPN routing: {}", ip);
+    }
 
     // Save current default gateway
+    let mut original_gw: Option<String> = None;
     let output = Command::new("route")
         .args(["-n", "get", "default"])
         .output();
@@ -556,10 +566,44 @@ fn set_default_gateway(state: &Arc<Mutex<HelperState>>, gateway: &str) -> Helper
             if line.contains("gateway:") {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 2 {
+                    original_gw = Some(parts[1].to_string());
                     let mut state = state.lock().unwrap();
                     state.original_gateway = Some(parts[1].to_string());
                     log::info!("Saved original gateway: {}", parts[1]);
                 }
+            }
+        }
+    }
+
+    // Add bypass route for excluded IP (e.g., relay endpoint) via original gateway
+    // This MUST be done BEFORE setting VPN routes to prevent routing loop
+    if let (Some(ip), Some(ref orig_gw)) = (exclude_ip, &original_gw) {
+        log::info!("Adding bypass route for {} via {}", ip, orig_gw);
+        let result = Command::new("route")
+            .args(["-n", "add", "-host", ip, orig_gw])
+            .output();
+
+        match result {
+            Ok(o) if o.status.success() => {
+                log::info!("Bypass route added successfully");
+                // Store excluded IP so we can remove it on restore
+                let mut state = state.lock().unwrap();
+                state.excluded_ip = Some(ip.to_string());
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                log::warn!("Bypass route may already exist: {}", stderr);
+                // Still store it so we can try to clean it up
+                let mut state = state.lock().unwrap();
+                state.excluded_ip = Some(ip.to_string());
+            }
+            Err(e) => {
+                log::error!("Failed to add bypass route: {}", e);
+                return HelperResponse {
+                    success: false,
+                    message: format!("Failed to add bypass route for {}: {}", ip, e),
+                    data: None,
+                };
             }
         }
     }
@@ -603,7 +647,18 @@ fn restore_default_gateway(state: &Arc<Mutex<HelperState>>) -> HelperResponse {
         .output()
         .ok();
 
-    let state = state.lock().unwrap();
+    let mut state = state.lock().unwrap();
+
+    // Remove bypass route for excluded IP
+    if let Some(ref excluded) = state.excluded_ip {
+        log::info!("Removing bypass route for {}", excluded);
+        Command::new("route")
+            .args(["-n", "delete", "-host", excluded])
+            .output()
+            .ok();
+    }
+    state.excluded_ip = None;
+
     if let Some(ref original) = state.original_gateway {
         log::info!("Restored original gateway: {}", original);
     }
