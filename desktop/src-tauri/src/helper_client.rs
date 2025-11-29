@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 const SOCKET_PATH: &str = "/var/run/ple7-helper.sock";
 const HELPER_PATH: &str = "/Library/PrivilegedHelperTools/ple7-helper";
 const PLIST_PATH: &str = "/Library/LaunchDaemons/com.ple7.vpn.helper.plist";
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "command")]
@@ -64,6 +65,8 @@ pub enum HelperCommand {
     Status,
     #[serde(rename = "ping")]
     Ping,
+    #[serde(rename = "get_version")]
+    GetVersion,
 }
 
 #[derive(Debug, Deserialize)]
@@ -310,6 +313,39 @@ echo 'Helper installed successfully'
     pub fn ping(&mut self) -> Result<bool, String> {
         let response = self.send_command(HelperCommand::Ping)?;
         Ok(response.success && response.message == "pong")
+    }
+
+    /// Get the helper version
+    pub fn get_version(&mut self) -> Result<String, String> {
+        let response = self.send_command(HelperCommand::GetVersion)?;
+        if response.success {
+            Ok(response.message)
+        } else {
+            Err("Failed to get version".to_string())
+        }
+    }
+
+    /// Check if helper version matches app version
+    pub fn version_matches(&mut self) -> bool {
+        match self.get_version() {
+            Ok(helper_version) => {
+                let matches = helper_version == APP_VERSION;
+                if !matches {
+                    log::info!("Helper version mismatch: helper={}, app={}", helper_version, APP_VERSION);
+                }
+                matches
+            }
+            Err(_) => {
+                // Old helper without version command - needs update
+                log::info!("Helper doesn't support version command - needs update");
+                false
+            }
+        }
+    }
+
+    /// Get the app version (for comparison)
+    pub fn app_version() -> &'static str {
+        APP_VERSION
     }
 
     /// Read a packet from the TUN device

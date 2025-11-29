@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 const SOCKET_PATH: &str = "/var/run/ple7-helper.sock";
+const HELPER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "command")]
@@ -66,6 +67,8 @@ enum HelperCommand {
     Status,
     #[serde(rename = "ping")]
     Ping,
+    #[serde(rename = "get_version")]
+    GetVersion,
 }
 
 // Helper module for base64 serialization
@@ -227,6 +230,16 @@ fn handle_command(cmd: HelperCommand, state: &Arc<Mutex<HelperState>>) -> Helper
                 success: true,
                 message: "pong".to_string(),
                 data: None,
+            }
+        }
+
+        HelperCommand::GetVersion => {
+            HelperResponse {
+                success: true,
+                message: HELPER_VERSION.to_string(),
+                data: Some(serde_json::json!({
+                    "version": HELPER_VERSION,
+                })),
             }
         }
 
