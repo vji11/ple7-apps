@@ -160,18 +160,35 @@ echo 'Helper installed successfully'
             .map_err(|e| format!("Failed to run osascript: {}", e))?;
 
         if output.status.success() {
-            log::info!("Helper installed successfully");
+            log::info!("Helper installed successfully, waiting for daemon to be ready...");
 
-            // Wait for daemon to start
-            for _ in 0..10 {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                if Self::is_running() {
-                    log::info!("Helper daemon is now running");
-                    return Ok(());
+            // Wait for daemon to actually respond to ping (not just socket file existence)
+            for attempt in 1..=20 {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+
+                // First check if socket exists
+                if !Self::is_running() {
+                    log::debug!("Attempt {}/20: Socket not yet created", attempt);
+                    continue;
+                }
+
+                // Try to ping the daemon
+                let mut client = Self::new();
+                match client.ping() {
+                    Ok(true) => {
+                        log::info!("Helper daemon is ready (attempt {})", attempt);
+                        return Ok(());
+                    }
+                    Ok(false) => {
+                        log::debug!("Attempt {}/20: Ping returned false", attempt);
+                    }
+                    Err(e) => {
+                        log::debug!("Attempt {}/20: Ping failed: {}", attempt, e);
+                    }
                 }
             }
 
-            Err("Helper installed but daemon not starting".to_string())
+            Err("Helper installed but daemon not responding after 5 seconds".to_string())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
