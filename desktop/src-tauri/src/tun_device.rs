@@ -465,6 +465,8 @@ mod windows {
         #[allow(dead_code)]
         netmask: Ipv4Addr,
         interface_index: u32,
+        /// Original default gateway saved before VPN routes are added
+        original_gateway: Option<String>,
     }
 
     impl WindowsTun {
@@ -555,6 +557,15 @@ mod windows {
                 }
             };
 
+            // IMPORTANT: Capture original default gateway BEFORE configuring TUN
+            // This must happen before any routes are added, otherwise we'll get the VPN gateway
+            let original_gateway = Self::get_original_gateway();
+            if let Some(ref gw) = original_gateway {
+                log::info!("Saved original default gateway: {}", gw);
+            } else {
+                log::warn!("Could not determine original default gateway");
+            }
+
             // Configure IP address using netsh
             Self::configure_address(&adapter, name, address, netmask)?;
 
@@ -575,7 +586,47 @@ mod windows {
                 address,
                 netmask,
                 interface_index,
+                original_gateway,
             })
+        }
+
+        /// Get the original default gateway before VPN routes are added
+        fn get_original_gateway() -> Option<String> {
+            use std::process::Command;
+            use std::os::windows::process::CommandExt;
+
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+            let output = Command::new("route")
+                .args(["print", "0.0.0.0"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+                .ok()?;
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+
+            // Parse route output to find default gateway
+            // Format: "0.0.0.0   0.0.0.0   gateway   interface   metric"
+            for line in stdout.lines() {
+                let line = line.trim();
+                // Look for lines starting with 0.0.0.0 (default route)
+                if line.starts_with("0.0.0.0") && !line.contains("On-link") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    // parts[0] = 0.0.0.0, parts[1] = 0.0.0.0 (mask), parts[2] = gateway
+                    if parts.len() >= 3 {
+                        let gw = parts[2];
+                        // Validate it's a real IP, not our VPN address
+                        if let Ok(ip) = gw.parse::<std::net::Ipv4Addr>() {
+                            // Skip loopback and link-local
+                            if !ip.is_loopback() && !ip.is_link_local() {
+                                return Some(gw.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+
+            None
         }
 
         /// Get interface index by name using multiple methods for reliability
@@ -760,6 +811,7 @@ mod windows {
             let address = self.address;
             let exclude = exclude_ip.map(|s| s.to_string());
             let if_index = self.interface_index;
+            let original_gw = self.original_gateway.clone();
 
             tokio::task::spawn_blocking(move || {
                 use std::process::Command;
@@ -767,34 +819,29 @@ mod windows {
 
                 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-                // Add bypass route for excluded IP via default gateway (NOT through VPN interface)
-                if let Some(ref ip) = exclude {
-                    // Get current default gateway using route print
+                // Add bypass route for excluded IP via the ORIGINAL default gateway
+                // We use the saved gateway from TUN creation time, before any VPN routes were added
+                if let (Some(ref ip), Some(ref gw)) = (&exclude, &original_gw) {
+                    log::info!("Adding bypass route for {} via original gateway {}", ip, gw);
                     let output = Command::new("route")
-                        .args(["print", "0.0.0.0"])
+                        .args(["add", ip, "mask", "255.255.255.255", gw])
                         .creation_flags(CREATE_NO_WINDOW)
-                        .output()
-                        .map_err(|e| format!("Failed to get routes: {}", e))?;
+                        .output();
 
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    // Parse route output to find default gateway (look for 0.0.0.0 ... gateway)
-                    for line in stdout.lines() {
-                        if line.contains("0.0.0.0") && !line.contains("On-link") {
-                            let parts: Vec<&str> = line.split_whitespace().collect();
-                            if parts.len() >= 3 {
-                                let gw = parts[2];
-                                if gw.parse::<std::net::Ipv4Addr>().is_ok() {
-                                    log::info!("Adding bypass route for {} via {}", ip, gw);
-                                    Command::new("route")
-                                        .args(["add", ip, "mask", "255.255.255.255", gw])
-                                        .creation_flags(CREATE_NO_WINDOW)
-                                        .output()
-                                        .ok(); // Ignore errors (may already exist)
-                                    break;
-                                }
-                            }
+                    match output {
+                        Ok(o) if o.status.success() => {
+                            log::info!("Bypass route added successfully");
+                        }
+                        Ok(o) => {
+                            let stderr = String::from_utf8_lossy(&o.stderr);
+                            log::warn!("Bypass route may already exist: {}", stderr);
+                        }
+                        Err(e) => {
+                            log::error!("Failed to add bypass route: {}", e);
                         }
                     }
+                } else if exclude.is_some() {
+                    log::warn!("Cannot add bypass route: original gateway not available");
                 }
 
                 // Add split routes through VPN interface with low metric to ensure priority
