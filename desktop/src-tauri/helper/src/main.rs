@@ -764,8 +764,8 @@ fn write_packet(state: &Arc<Mutex<HelperState>>, tun_name: &str, data: &[u8]) ->
     let fd = tun_info.fd;
 
     // Prepare packet with utun header
-    // utun header: 4 bytes, first 4 bytes indicate address family
-    // AF_INET = 2 on macOS (little endian: 02 00 00 00)
+    // utun header: 4 bytes indicating address family in NETWORK BYTE ORDER (big-endian)
+    // AF_INET = 2, AF_INET6 = 30 on macOS
     let mut packet = Vec::with_capacity(4 + data.len());
 
     // Detect IP version from first nibble
@@ -775,7 +775,8 @@ fn write_packet(state: &Arc<Mutex<HelperState>>, tun_name: &str, data: &[u8]) ->
         libc::AF_INET as u32   // IPv4
     };
 
-    packet.extend_from_slice(&af.to_ne_bytes());
+    // CRITICAL: macOS utun expects address family in network byte order (big-endian)
+    packet.extend_from_slice(&af.to_be_bytes());
     packet.extend_from_slice(data);
 
     let n = unsafe {
