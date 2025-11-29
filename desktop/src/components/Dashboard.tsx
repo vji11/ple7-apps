@@ -250,7 +250,7 @@ export default function Dashboard({ onLogout }: DashboardProps) {
   const isConnecting = connectionStatus === "connecting" || connectionStatus === "disconnecting";
 
   return (
-    <div className="min-h-screen p-4">
+    <div className="min-h-screen p-4 flex flex-col">
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-2">
@@ -599,10 +599,11 @@ export default function Dashboard({ onLogout }: DashboardProps) {
         </motion.div>
       )}
 
-      {/* Footer */}
-      <div className="mt-auto pt-4 pb-2 text-center text-xs text-muted-foreground/50">
-        {appVersion && <p>v{appVersion}</p>}
-        <p>&copy; 2025 PLE7</p>
+      {/* Footer - positioned at bottom */}
+      <div className="mt-auto pt-6 pb-2 flex items-center justify-center gap-2 text-xs text-muted-foreground/50">
+        {appVersion && <span>v{appVersion}</span>}
+        {appVersion && <span>•</span>}
+        <span>&copy; 2025 PLE7</span>
       </div>
 
       {/* Logs Modal */}
