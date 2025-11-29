@@ -338,6 +338,8 @@ impl WgTunnel {
     ) {
         use std::sync::atomic::Ordering;
 
+        log::info!("[TUN] TUN read loop started - waiting for outgoing packets");
+
         loop {
             if !running.load(Ordering::SeqCst) {
                 break;
@@ -350,7 +352,7 @@ impl WgTunnel {
                     // Only log non-timeout errors
                     let err_str = e.to_string();
                     if running.load(Ordering::SeqCst) && !err_str.contains("timeout") && !err_str.contains("timed out") {
-                        log::error!("TUN read error: {}", e);
+                        log::error!("[TUN] TUN read error: {}", e);
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                     continue;
@@ -359,8 +361,16 @@ impl WgTunnel {
 
             // Determine destination from IP header
             if packet.data.len() < 20 {
+                log::warn!("[TUN] Received invalid packet (too short: {} bytes)", packet.data.len());
                 continue; // Invalid IP packet
             }
+
+            let src_ip = Ipv4Addr::new(
+                packet.data[12],
+                packet.data[13],
+                packet.data[14],
+                packet.data[15],
+            );
 
             let dst_ip = Ipv4Addr::new(
                 packet.data[16],
@@ -369,10 +379,29 @@ impl WgTunnel {
                 packet.data[19],
             );
 
+            // Get protocol from IP header
+            let protocol = packet.data[9];
+            let proto_name = match protocol {
+                1 => "ICMP",
+                6 => "TCP",
+                17 => "UDP",
+                _ => "OTHER",
+            };
+
+            log::info!("[TUN] Read {} bytes from TUN: {} -> {} ({})",
+                packet.data.len(), src_ip, dst_ip, proto_name);
+
             // Find the peer that handles this destination
             let mut peers = peers.write();
+            let peer_count = peers.len();
 
-            for (pub_key, peer_state) in peers.iter_mut() {
+            if peer_count == 0 {
+                log::warn!("[TUN] No peers configured, dropping packet");
+                continue;
+            }
+
+            let mut packet_sent = false;
+            for (_pub_key, peer_state) in peers.iter_mut() {
                 // Check if destination matches any allowed IP
                 let matches = peer_state.endpoint.is_some(); // Simplified - send to first peer with endpoint
 
@@ -383,18 +412,32 @@ impl WgTunnel {
                         match peer_state.tunnel.encapsulate(&packet.data, &mut dst) {
                             TunnResult::WriteToNetwork(data) => {
                                 peer_state.tx_bytes += data.len() as u64;
-                                if let Err(e) = socket.send_to(data, endpoint) {
-                                    log::error!("Failed to send encrypted packet: {}", e);
+                                match socket.send_to(data, endpoint) {
+                                    Ok(sent) => {
+                                        log::info!("[TUN] Encrypted and sent {} bytes to {}", sent, endpoint);
+                                        packet_sent = true;
+                                    }
+                                    Err(e) => {
+                                        log::error!("[TUN] Failed to send encrypted packet to {}: {}", endpoint, e);
+                                    }
                                 }
                             }
                             TunnResult::Err(e) => {
-                                log::warn!("Encapsulation error: {:?}", e);
+                                log::warn!("[TUN] Encapsulation error: {:?}", e);
                             }
-                            _ => {}
+                            other => {
+                                log::debug!("[TUN] Encapsulate returned: {:?}", other);
+                            }
                         }
+                    } else {
+                        log::warn!("[TUN] Peer has no endpoint set");
                     }
                     break;
                 }
+            }
+
+            if !packet_sent {
+                log::warn!("[TUN] Packet to {} was not sent (no matching peer with endpoint)", dst_ip);
             }
         }
     }
