@@ -4,9 +4,9 @@
 use std::net::{SocketAddr, Ipv4Addr, UdpSocket as StdUdpSocket};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::collections::HashMap;
 
 use boringtun::noise::{Tunn, TunnResult};
+use dashmap::DashMap;
 use parking_lot::RwLock;
 use tokio::net::UdpSocket;
 use base64::Engine as _;
@@ -61,7 +61,7 @@ pub struct WgTunnel {
     public_key: x25519_dalek::PublicKey,
     socket: Arc<UdpSocket>,
     tun_device: Arc<TunDevice>,
-    peers: Arc<RwLock<HashMap<[u8; 32], PeerState>>>,
+    peers: Arc<DashMap<[u8; 32], PeerState>>,
     running: Arc<std::sync::atomic::AtomicBool>,
     public_endpoint: Arc<RwLock<Option<SocketAddr>>>,
 }
@@ -102,8 +102,8 @@ impl WgTunnel {
         // Create TUN device
         let tun_device = TunDevice::create("ple7", config.address, config.netmask).await?;
 
-        // Initialize peers
-        let mut peers_map = HashMap::new();
+        // Initialize peers with DashMap for lock-free concurrent access
+        let peers_map = DashMap::new();
         for peer in &config.peers {
             let peer_public_key = x25519_dalek::PublicKey::from(peer.public_key);
 
@@ -131,7 +131,7 @@ impl WgTunnel {
             public_key,
             socket: Arc::new(socket),
             tun_device: Arc::new(tun_device),
-            peers: Arc::new(RwLock::new(peers_map)),
+            peers: Arc::new(peers_map),
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             public_endpoint: Arc::new(RwLock::new(public_endpoint)),
         })
@@ -206,26 +206,23 @@ impl WgTunnel {
 
     /// Initiate handshakes with all peers
     async fn initiate_handshakes(&self) -> Result<(), String> {
-        // Collect handshake packets to send outside lock
-        let packets: Vec<(Vec<u8>, SocketAddr)> = {
-            let mut peers = self.peers.write();
-            let mut result = Vec::new();
+        // Collect handshake packets - DashMap locks per-entry, not globally
+        let mut packets: Vec<(Vec<u8>, SocketAddr)> = Vec::new();
 
-            for (_pub_key, peer_state) in peers.iter_mut() {
-                if let Some(endpoint) = peer_state.endpoint {
-                    let mut dst = [0u8; 2048];
-                    match peer_state.tunnel.format_handshake_initiation(&mut dst, false) {
-                        TunnResult::WriteToNetwork(data) => {
-                            result.push((data.to_vec(), endpoint));
-                        }
-                        _ => {}
+        for mut entry in self.peers.iter_mut() {
+            let peer_state = entry.value_mut();
+            if let Some(endpoint) = peer_state.endpoint {
+                let mut dst = [0u8; 2048];
+                match peer_state.tunnel.format_handshake_initiation(&mut dst, false) {
+                    TunnResult::WriteToNetwork(data) => {
+                        packets.push((data.to_vec(), endpoint));
                     }
+                    _ => {}
                 }
             }
-            result
-        };
+        }
 
-        // Send handshakes outside the lock
+        // Send handshakes
         for (data, endpoint) in packets {
             if let Err(e) = self.socket.send_to(&data, endpoint).await {
                 log::warn!("Failed to send handshake to {:?}: {}", endpoint, e);
@@ -249,7 +246,7 @@ impl WgTunnel {
     /// UDP read loop - handles incoming WireGuard packets
     async fn udp_read_loop(
         socket: Arc<UdpSocket>,
-        peers: Arc<RwLock<HashMap<[u8; 32], PeerState>>>,
+        peers: Arc<DashMap<[u8; 32], PeerState>>,
         tun: Arc<TunDevice>,
         running: Arc<std::sync::atomic::AtomicBool>,
     ) {
@@ -274,49 +271,45 @@ impl WgTunnel {
                 }
             };
 
-            // Process packet - collect data to write, then drop lock before async I/O
-            let (write_data, response_data): (Option<Vec<u8>>, Option<Vec<u8>>) = {
-                let mut peers = peers.write();
+            // Process packet - DashMap locks per-entry, not globally
+            let mut write_data: Option<Vec<u8>> = None;
+            let mut response_data: Option<Vec<u8>> = None;
 
-                let mut result_data = None;
-                let mut response = None;
-                for (_pub_key, peer_state) in peers.iter_mut() {
-                    let mut dst = [0u8; 2048];
+            for mut entry in peers.iter_mut() {
+                let peer_state = entry.value_mut();
+                let mut dst = [0u8; 2048];
 
-                    match peer_state.tunnel.decapsulate(None, &buf[..len], &mut dst) {
-                        TunnResult::WriteToTunnelV4(data, _) => {
-                            peer_state.rx_bytes += data.len() as u64;
-                            peer_state.endpoint = Some(src_addr);
-                            result_data = Some(data.to_vec());
-                            break;
-                        }
-                        TunnResult::WriteToTunnelV6(data, _) => {
-                            peer_state.rx_bytes += data.len() as u64;
-                            peer_state.endpoint = Some(src_addr);
-                            result_data = Some(data.to_vec());
-                            break;
-                        }
-                        TunnResult::WriteToNetwork(data) => {
-                            // Collect response to send outside lock
-                            response = Some(data.to_vec());
-                        }
-                        TunnResult::Done => {
-                            peer_state.last_handshake = Some(Instant::now());
-                        }
-                        TunnResult::Err(_) => {
-                            continue;
-                        }
+                match peer_state.tunnel.decapsulate(None, &buf[..len], &mut dst) {
+                    TunnResult::WriteToTunnelV4(data, _) => {
+                        peer_state.rx_bytes += data.len() as u64;
+                        peer_state.endpoint = Some(src_addr);
+                        write_data = Some(data.to_vec());
+                        break;
+                    }
+                    TunnResult::WriteToTunnelV6(data, _) => {
+                        peer_state.rx_bytes += data.len() as u64;
+                        peer_state.endpoint = Some(src_addr);
+                        write_data = Some(data.to_vec());
+                        break;
+                    }
+                    TunnResult::WriteToNetwork(data) => {
+                        response_data = Some(data.to_vec());
+                    }
+                    TunnResult::Done => {
+                        peer_state.last_handshake = Some(Instant::now());
+                    }
+                    TunnResult::Err(_) => {
+                        continue;
                     }
                 }
-                (result_data, response)
-            }; // Lock dropped here
+            }
 
-            // Send handshake response outside the lock (async)
+            // Send handshake response (async)
             if let Some(data) = response_data {
                 let _ = socket.send_to(&data, src_addr).await;
             }
 
-            // Write decrypted data to TUN outside the lock
+            // Write decrypted data to TUN
             if let Some(data) = write_data {
                 if let Err(e) = tun.write(&data).await {
                     log::error!("[WG] TUN write failed: {}", e);
@@ -329,7 +322,7 @@ impl WgTunnel {
     async fn tun_read_loop(
         tun: Arc<TunDevice>,
         socket: Arc<UdpSocket>,
-        peers: Arc<RwLock<HashMap<[u8; 32], PeerState>>>,
+        peers: Arc<DashMap<[u8; 32], PeerState>>,
         running: Arc<std::sync::atomic::AtomicBool>,
     ) {
         use std::sync::atomic::Ordering;
@@ -358,33 +351,31 @@ impl WgTunnel {
                 continue;
             }
 
-            // Encapsulate packet - collect data to send outside lock
-            let send_data: Option<(Vec<u8>, SocketAddr)> = {
-                let mut peers = peers.write();
+            // Skip if no peers
+            if peers.is_empty() {
+                continue;
+            }
 
-                if peers.len() == 0 {
-                    continue;
-                }
+            // Encapsulate packet - DashMap locks per-entry
+            let mut send_data: Option<(Vec<u8>, SocketAddr)> = None;
 
-                let mut result = None;
-                for (_pub_key, peer_state) in peers.iter_mut() {
-                    if let Some(endpoint) = peer_state.endpoint {
-                        let mut dst = [0u8; 2048];
+            for mut entry in peers.iter_mut() {
+                let peer_state = entry.value_mut();
+                if let Some(endpoint) = peer_state.endpoint {
+                    let mut dst = [0u8; 2048];
 
-                        match peer_state.tunnel.encapsulate(&packet.data, &mut dst) {
-                            TunnResult::WriteToNetwork(data) => {
-                                peer_state.tx_bytes += data.len() as u64;
-                                result = Some((data.to_vec(), endpoint));
-                            }
-                            _ => {}
+                    match peer_state.tunnel.encapsulate(&packet.data, &mut dst) {
+                        TunnResult::WriteToNetwork(data) => {
+                            peer_state.tx_bytes += data.len() as u64;
+                            send_data = Some((data.to_vec(), endpoint));
                         }
-                        break;
+                        _ => {}
                     }
+                    break;
                 }
-                result
-            }; // Lock dropped here
+            }
 
-            // Send encrypted packet outside the lock (async)
+            // Send encrypted packet (async)
             if let Some((data, endpoint)) = send_data {
                 let _ = socket.send_to(&data, endpoint).await;
             }
@@ -394,7 +385,7 @@ impl WgTunnel {
     /// Keepalive loop - sends periodic keepalives and maintains handshakes
     async fn keepalive_loop(
         socket: Arc<UdpSocket>,
-        peers: Arc<RwLock<HashMap<[u8; 32], PeerState>>>,
+        peers: Arc<DashMap<[u8; 32], PeerState>>,
         running: Arc<std::sync::atomic::AtomicBool>,
     ) {
         use std::sync::atomic::Ordering;
@@ -408,27 +399,24 @@ impl WgTunnel {
                 break;
             }
 
-            // Collect keepalive packets to send outside lock
-            let packets_to_send: Vec<(Vec<u8>, SocketAddr)> = {
-                let mut peers = peers.write();
-                let mut packets = Vec::new();
+            // Collect keepalive packets - DashMap locks per-entry
+            let mut packets_to_send: Vec<(Vec<u8>, SocketAddr)> = Vec::new();
 
-                for (_pub_key, peer_state) in peers.iter_mut() {
-                    if let Some(endpoint) = peer_state.endpoint {
-                        let mut dst = [0u8; 2048];
+            for mut entry in peers.iter_mut() {
+                let peer_state = entry.value_mut();
+                if let Some(endpoint) = peer_state.endpoint {
+                    let mut dst = [0u8; 2048];
 
-                        match peer_state.tunnel.update_timers(&mut dst) {
-                            TunnResult::WriteToNetwork(data) => {
-                                packets.push((data.to_vec(), endpoint));
-                            }
-                            _ => {}
+                    match peer_state.tunnel.update_timers(&mut dst) {
+                        TunnResult::WriteToNetwork(data) => {
+                            packets_to_send.push((data.to_vec(), endpoint));
                         }
+                        _ => {}
                     }
                 }
-                packets
-            }; // Lock dropped here
+            }
 
-            // Send keepalives outside the lock
+            // Send keepalives
             for (data, endpoint) in packets_to_send {
                 let _ = socket.send_to(&data, endpoint).await;
             }
@@ -442,17 +430,15 @@ impl WgTunnel {
 
     /// Get tunnel statistics
     pub fn get_stats(&self) -> Vec<(String, u64, u64)> {
-        let peers = self.peers.read();
-        peers.iter().map(|(key, state)| {
-            let key_b64 = base64::engine::general_purpose::STANDARD.encode(key);
-            (key_b64, state.tx_bytes, state.rx_bytes)
+        self.peers.iter().map(|entry| {
+            let key_b64 = base64::engine::general_purpose::STANDARD.encode(entry.key());
+            (key_b64, entry.value().tx_bytes, entry.value().rx_bytes)
         }).collect()
     }
 
     /// Update peer endpoint (for NAT traversal)
     pub fn update_peer_endpoint(&self, public_key: &[u8; 32], endpoint: SocketAddr) {
-        let mut peers = self.peers.write();
-        if let Some(peer) = peers.get_mut(public_key) {
+        if let Some(mut peer) = self.peers.get_mut(public_key) {
             log::info!("Updating peer endpoint: {:?} -> {}", public_key, endpoint);
             peer.endpoint = Some(endpoint);
         }
