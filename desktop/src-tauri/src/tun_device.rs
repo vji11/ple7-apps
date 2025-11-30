@@ -359,8 +359,8 @@ mod macos {
             tokio::task::spawn_blocking(move || {
                 let mut client = HelperClient::new();
 
-                // Use 100ms timeout to prevent blocking forever
-                match client.read_packet(&name, Some(100)) {
+                // Use 5ms timeout for responsive packet processing
+                match client.read_packet(&name, Some(5)) {
                     Ok(Some(data)) => Ok(TunPacket { data }),
                     Ok(None) => Err("timeout".to_string()), // Timeout, caller should retry
                     Err(e) => Err(format!("Failed to read from TUN: {}", e)),

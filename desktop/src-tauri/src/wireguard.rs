@@ -1,14 +1,14 @@
 //! WireGuard tunnel implementation using boringtun
 //! Handles encryption/decryption of VPN traffic
 
-use std::net::{SocketAddr, Ipv4Addr, UdpSocket};
+use std::net::{SocketAddr, Ipv4Addr, UdpSocket as StdUdpSocket};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 
-use boringtun::noise::{Tunn, TunnResult, handshake::parse_handshake_anon};
-use parking_lot::{Mutex, RwLock};
-use tokio::sync::mpsc;
+use boringtun::noise::{Tunn, TunnResult};
+use parking_lot::RwLock;
+use tokio::net::UdpSocket;
 use base64::Engine as _;
 
 use crate::tun_device::{TunDevice, TUN_MTU};
@@ -80,11 +80,9 @@ impl WgTunnel {
         let listen_port = config.listen_port.unwrap_or_else(|| Self::find_available_port());
         let bind_addr = format!("0.0.0.0:{}", listen_port);
 
-        let socket = UdpSocket::bind(&bind_addr)
+        // Use tokio's async UDP socket for better performance
+        let socket = UdpSocket::bind(&bind_addr).await
             .map_err(|e| format!("Failed to bind UDP socket on {}: {}", bind_addr, e))?;
-
-        socket.set_nonblocking(true)
-            .map_err(|e| format!("Failed to set socket non-blocking: {}", e))?;
 
         log::info!("WireGuard listening on port {}", listen_port);
 
@@ -141,7 +139,7 @@ impl WgTunnel {
 
     fn find_available_port() -> u16 {
         for port in WG_PORT_START..=WG_PORT_END {
-            if UdpSocket::bind(format!("0.0.0.0:{}", port)).is_ok() {
+            if StdUdpSocket::bind(format!("0.0.0.0:{}", port)).is_ok() {
                 return port;
             }
         }
@@ -208,21 +206,31 @@ impl WgTunnel {
 
     /// Initiate handshakes with all peers
     async fn initiate_handshakes(&self) -> Result<(), String> {
-        let mut peers = self.peers.write();
+        // Collect handshake packets to send outside lock
+        let packets: Vec<(Vec<u8>, SocketAddr)> = {
+            let mut peers = self.peers.write();
+            let mut result = Vec::new();
 
-        for (pub_key, peer_state) in peers.iter_mut() {
-            if let Some(endpoint) = peer_state.endpoint {
-                let mut dst = [0u8; 2048];
-                match peer_state.tunnel.format_handshake_initiation(&mut dst, false) {
-                    TunnResult::WriteToNetwork(data) => {
-                        if let Err(e) = self.socket.send_to(data, endpoint) {
-                            log::warn!("Failed to send handshake to {:?}: {}", endpoint, e);
-                        } else {
-                            log::info!("Sent handshake initiation to {}", endpoint);
+            for (_pub_key, peer_state) in peers.iter_mut() {
+                if let Some(endpoint) = peer_state.endpoint {
+                    let mut dst = [0u8; 2048];
+                    match peer_state.tunnel.format_handshake_initiation(&mut dst, false) {
+                        TunnResult::WriteToNetwork(data) => {
+                            result.push((data.to_vec(), endpoint));
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
+            }
+            result
+        };
+
+        // Send handshakes outside the lock
+        for (data, endpoint) in packets {
+            if let Err(e) = self.socket.send_to(&data, endpoint).await {
+                log::warn!("Failed to send handshake to {:?}: {}", endpoint, e);
+            } else {
+                log::info!("Sent handshake initiation to {}", endpoint);
             }
         }
 
@@ -247,83 +255,71 @@ impl WgTunnel {
     ) {
         use std::sync::atomic::Ordering;
 
+        // Reusable buffer to avoid allocations in hot path
+        let mut buf = [0u8; 2048]; // WireGuard packets are max ~1500 bytes
+
         loop {
             if !running.load(Ordering::SeqCst) {
                 break;
             }
 
-            // Read from UDP socket
-            let socket_clone = socket.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                socket_clone.set_read_timeout(Some(Duration::from_millis(100))).ok();
-                let mut buf = [0u8; 65535];
-                socket_clone.recv_from(&mut buf).map(|(n, addr)| (buf, n, addr))
-            }).await;
-
-            let (buf, len, src_addr) = match result {
-                Ok(Ok(data)) => {
-                    log::debug!("[WG] UDP received {} bytes from {}", data.1, data.2);
-                    data
-                },
-                Ok(Err(e)) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-                Ok(Err(e)) if e.kind() == std::io::ErrorKind::TimedOut => continue,
-                Ok(Err(e)) => {
-                    log::error!("UDP recv error: {}", e);
-                    continue;
-                }
+            // Async UDP recv - no spawn_blocking overhead
+            let (len, src_addr) = match socket.recv_from(&mut buf).await {
+                Ok(data) => data,
                 Err(e) => {
-                    log::error!("UDP recv task error: {}", e);
+                    if e.kind() != std::io::ErrorKind::WouldBlock {
+                        log::error!("UDP recv error: {}", e);
+                    }
                     continue;
                 }
             };
 
             // Process packet - collect data to write, then drop lock before async I/O
-            let write_data: Option<Vec<u8>> = {
+            let (write_data, response_data): (Option<Vec<u8>>, Option<Vec<u8>>) = {
                 let mut peers = peers.write();
 
                 let mut result_data = None;
+                let mut response = None;
                 for (_pub_key, peer_state) in peers.iter_mut() {
-                    let mut dst = [0u8; 65535];
+                    let mut dst = [0u8; 2048];
 
                     match peer_state.tunnel.decapsulate(None, &buf[..len], &mut dst) {
                         TunnResult::WriteToTunnelV4(data, _) => {
-                            log::info!("[WG] Decrypted IPv4 packet: {} bytes, writing to TUN", data.len());
                             peer_state.rx_bytes += data.len() as u64;
                             peer_state.endpoint = Some(src_addr);
                             result_data = Some(data.to_vec());
                             break;
                         }
                         TunnResult::WriteToTunnelV6(data, _) => {
-                            log::info!("[WG] Decrypted IPv6 packet: {} bytes, writing to TUN", data.len());
                             peer_state.rx_bytes += data.len() as u64;
                             peer_state.endpoint = Some(src_addr);
                             result_data = Some(data.to_vec());
                             break;
                         }
                         TunnResult::WriteToNetwork(data) => {
-                            log::debug!("[WG] Sending {} bytes response to {}", data.len(), src_addr);
-                            if let Err(e) = socket.send_to(data, src_addr) {
-                                log::error!("Failed to send response: {}", e);
-                            }
+                            // Collect response to send outside lock
+                            response = Some(data.to_vec());
                         }
                         TunnResult::Done => {
-                            log::info!("[WG] Handshake completed with peer");
                             peer_state.last_handshake = Some(Instant::now());
                         }
-                        TunnResult::Err(e) => {
-                            log::debug!("[WG] Decapsulate error: {:?}", e);
+                        TunnResult::Err(_) => {
                             continue;
                         }
                     }
                 }
-                result_data
+                (result_data, response)
             }; // Lock dropped here
 
-            // Now do async I/O outside the lock
+            // Send handshake response outside the lock (async)
+            if let Some(data) = response_data {
+                let _ = socket.send_to(&data, src_addr).await;
+            }
+
+            // Write decrypted data to TUN outside the lock
             if let Some(data) = write_data {
-                match tun.write(&data).await {
-                    Ok(_) => log::info!("[WG] TUN write success: {} bytes", data.len()),
-                    Err(e) => log::error!("[WG] TUN write FAILED: {}", e),
+                if let Err(e) = tun.write(&data).await {
+                    log::error!("[WG] TUN write failed: {}", e);
                 }
             }
         }
@@ -337,8 +333,6 @@ impl WgTunnel {
         running: Arc<std::sync::atomic::AtomicBool>,
     ) {
         use std::sync::atomic::Ordering;
-
-        log::info!("[TUN] TUN read loop started - waiting for outgoing packets");
 
         loop {
             if !running.load(Ordering::SeqCst) {
@@ -354,90 +348,45 @@ impl WgTunnel {
                     if running.load(Ordering::SeqCst) && !err_str.contains("timeout") && !err_str.contains("timed out") {
                         log::error!("[TUN] TUN read error: {}", e);
                     }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    tokio::time::sleep(Duration::from_millis(1)).await;
                     continue;
                 }
             };
 
-            // Determine destination from IP header
+            // Skip invalid packets
             if packet.data.len() < 20 {
-                log::warn!("[TUN] Received invalid packet (too short: {} bytes)", packet.data.len());
-                continue; // Invalid IP packet
-            }
-
-            let src_ip = Ipv4Addr::new(
-                packet.data[12],
-                packet.data[13],
-                packet.data[14],
-                packet.data[15],
-            );
-
-            let dst_ip = Ipv4Addr::new(
-                packet.data[16],
-                packet.data[17],
-                packet.data[18],
-                packet.data[19],
-            );
-
-            // Get protocol from IP header
-            let protocol = packet.data[9];
-            let proto_name = match protocol {
-                1 => "ICMP",
-                6 => "TCP",
-                17 => "UDP",
-                _ => "OTHER",
-            };
-
-            log::info!("[TUN] Read {} bytes from TUN: {} -> {} ({})",
-                packet.data.len(), src_ip, dst_ip, proto_name);
-
-            // Find the peer that handles this destination
-            let mut peers = peers.write();
-            let peer_count = peers.len();
-
-            if peer_count == 0 {
-                log::warn!("[TUN] No peers configured, dropping packet");
                 continue;
             }
 
-            let mut packet_sent = false;
-            for (_pub_key, peer_state) in peers.iter_mut() {
-                // Check if destination matches any allowed IP
-                let matches = peer_state.endpoint.is_some(); // Simplified - send to first peer with endpoint
+            // Encapsulate packet - collect data to send outside lock
+            let send_data: Option<(Vec<u8>, SocketAddr)> = {
+                let mut peers = peers.write();
 
-                if matches {
+                if peers.len() == 0 {
+                    continue;
+                }
+
+                let mut result = None;
+                for (_pub_key, peer_state) in peers.iter_mut() {
                     if let Some(endpoint) = peer_state.endpoint {
-                        let mut dst = [0u8; 65535];
+                        let mut dst = [0u8; 2048];
 
                         match peer_state.tunnel.encapsulate(&packet.data, &mut dst) {
                             TunnResult::WriteToNetwork(data) => {
                                 peer_state.tx_bytes += data.len() as u64;
-                                match socket.send_to(data, endpoint) {
-                                    Ok(sent) => {
-                                        log::info!("[TUN] Encrypted and sent {} bytes to {}", sent, endpoint);
-                                        packet_sent = true;
-                                    }
-                                    Err(e) => {
-                                        log::error!("[TUN] Failed to send encrypted packet to {}: {}", endpoint, e);
-                                    }
-                                }
+                                result = Some((data.to_vec(), endpoint));
                             }
-                            TunnResult::Err(e) => {
-                                log::warn!("[TUN] Encapsulation error: {:?}", e);
-                            }
-                            other => {
-                                log::debug!("[TUN] Encapsulate returned: {:?}", other);
-                            }
+                            _ => {}
                         }
-                    } else {
-                        log::warn!("[TUN] Peer has no endpoint set");
+                        break;
                     }
-                    break;
                 }
-            }
+                result
+            }; // Lock dropped here
 
-            if !packet_sent {
-                log::warn!("[TUN] Packet to {} was not sent (no matching peer with endpoint)", dst_ip);
+            // Send encrypted packet outside the lock (async)
+            if let Some((data, endpoint)) = send_data {
+                let _ = socket.send_to(&data, endpoint).await;
             }
         }
     }
@@ -459,25 +408,29 @@ impl WgTunnel {
                 break;
             }
 
-            let mut peers = peers.write();
+            // Collect keepalive packets to send outside lock
+            let packets_to_send: Vec<(Vec<u8>, SocketAddr)> = {
+                let mut peers = peers.write();
+                let mut packets = Vec::new();
 
-            for (pub_key, peer_state) in peers.iter_mut() {
-                if let Some(endpoint) = peer_state.endpoint {
-                    let mut dst = [0u8; 2048];
+                for (_pub_key, peer_state) in peers.iter_mut() {
+                    if let Some(endpoint) = peer_state.endpoint {
+                        let mut dst = [0u8; 2048];
 
-                    // Check if we need to send keepalive or re-handshake
-                    match peer_state.tunnel.update_timers(&mut dst) {
-                        TunnResult::WriteToNetwork(data) => {
-                            if let Err(e) = socket.send_to(data, endpoint) {
-                                log::warn!("Failed to send keepalive: {}", e);
+                        match peer_state.tunnel.update_timers(&mut dst) {
+                            TunnResult::WriteToNetwork(data) => {
+                                packets.push((data.to_vec(), endpoint));
                             }
+                            _ => {}
                         }
-                        TunnResult::Err(e) => {
-                            log::debug!("Timer update: {:?}", e);
-                        }
-                        _ => {}
                     }
                 }
+                packets
+            }; // Lock dropped here
+
+            // Send keepalives outside the lock
+            for (data, endpoint) in packets_to_send {
+                let _ = socket.send_to(&data, endpoint).await;
             }
         }
     }
