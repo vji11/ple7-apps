@@ -10,8 +10,7 @@ class VPNManager: ObservableObject {
     @Published var isConnecting = false
     @Published var connectedNetwork: String?
     @Published var connectedNetworkId: String?
-    @Published var selectedDevice: Device?
-    @Published var selectedNetwork: Network?
+    @Published var currentDevice: Device?
     @Published var connectionError: String?
 
     private var vpnManager: NETunnelProviderManager?
@@ -24,32 +23,22 @@ class VPNManager: ObservableObject {
         }
     }
 
-    func selectDevice(_ device: Device, network: Network) {
-        selectedDevice = device
-        selectedNetwork = network
-    }
-
-    func connect() async {
-        guard let device = selectedDevice, let network = selectedNetwork else {
-            connectionError = "No device selected"
-            return
-        }
-
+    /// Connect to VPN with the given device and WireGuard config string
+    func connect(device: Device, network: Network, configString: String) async {
         isConnecting = true
         connectionError = nil
 
         do {
-            // Fetch device config from API
-            let config = try await APIClient.shared.getDeviceConfig(deviceId: device.id)
-
-            // Store WireGuard config in shared keychain for the extension
-            let configData = try JSONEncoder().encode(config.wireGuard)
+            // Parse the WireGuard config string and store for the extension
+            let wgConfig = parseWireGuardConfig(configString)
+            let configData = try JSONEncoder().encode(wgConfig)
             try keychain.set(configData, key: "wireguardConfig")
 
             // Configure and start VPN
-            try await configureVPN(config: config, networkName: network.name)
+            try await configureVPN(configString: configString, networkName: network.name)
             try await startVPN()
 
+            currentDevice = device
             connectedNetwork = network.name
             connectedNetworkId = network.id
             isConnected = true
@@ -61,11 +50,100 @@ class VPNManager: ObservableObject {
         isConnecting = false
     }
 
+    /// Parse WireGuard INI-style config string into structured data
+    private func parseWireGuardConfig(_ configString: String) -> WireGuardConfigData {
+        var privateKey = ""
+        var address = ""
+        var dns: String? = nil
+        var peers: [WireGuardPeerData] = []
+
+        var currentSection = ""
+        var currentPeer: (publicKey: String, allowedIPs: String, endpoint: String?, persistentKeepalive: Int?) = ("", "", nil, nil)
+
+        for line in configString.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            // Skip comments and empty lines
+            if trimmed.isEmpty || trimmed.hasPrefix("#") {
+                continue
+            }
+
+            // Check for section headers
+            if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") {
+                // Save previous peer if exists
+                if currentSection == "Peer" && !currentPeer.publicKey.isEmpty {
+                    peers.append(WireGuardPeerData(
+                        publicKey: currentPeer.publicKey,
+                        allowedIPs: currentPeer.allowedIPs,
+                        endpoint: currentPeer.endpoint,
+                        persistentKeepalive: currentPeer.persistentKeepalive
+                    ))
+                    currentPeer = ("", "", nil, nil)
+                }
+                currentSection = String(trimmed.dropFirst().dropLast())
+                continue
+            }
+
+            // Parse key = value
+            let parts = trimmed.components(separatedBy: "=").map { $0.trimmingCharacters(in: .whitespaces) }
+            guard parts.count >= 2 else { continue }
+            let key = parts[0]
+            let value = parts.dropFirst().joined(separator: "=").trimmingCharacters(in: .whitespaces)
+
+            switch currentSection {
+            case "Interface":
+                switch key.lowercased() {
+                case "privatekey":
+                    privateKey = value
+                case "address":
+                    address = value.components(separatedBy: "/").first ?? value
+                case "dns":
+                    dns = value
+                default:
+                    break
+                }
+            case "Peer":
+                switch key.lowercased() {
+                case "publickey":
+                    currentPeer.publicKey = value
+                case "allowedips":
+                    currentPeer.allowedIPs = value
+                case "endpoint":
+                    currentPeer.endpoint = value
+                case "persistentkeepalive":
+                    currentPeer.persistentKeepalive = Int(value)
+                default:
+                    break
+                }
+            default:
+                break
+            }
+        }
+
+        // Don't forget the last peer
+        if !currentPeer.publicKey.isEmpty {
+            peers.append(WireGuardPeerData(
+                publicKey: currentPeer.publicKey,
+                allowedIPs: currentPeer.allowedIPs,
+                endpoint: currentPeer.endpoint,
+                persistentKeepalive: currentPeer.persistentKeepalive
+            ))
+        }
+
+        return WireGuardConfigData(
+            privateKey: privateKey,
+            address: address,
+            dns: dns,
+            peers: peers
+        )
+    }
+
     func disconnect() async {
         vpnManager?.connection.stopVPNTunnel()
         isConnected = false
         connectedNetwork = nil
         connectedNetworkId = nil
+        currentDevice = nil
     }
 
     // MARK: - Private
@@ -80,18 +158,26 @@ class VPNManager: ObservableObject {
         }
     }
 
-    private func configureVPN(config: DeviceConfig, networkName: String) async throws {
+    private func configureVPN(configString: String, networkName: String) async throws {
         guard let manager = vpnManager else { return }
+
+        // Extract endpoint from config for display
+        var serverAddress = "ple7.com"
+        for line in configString.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces).lowercased()
+            if trimmed.hasPrefix("endpoint") {
+                let parts = trimmed.components(separatedBy: "=")
+                if parts.count >= 2 {
+                    serverAddress = parts[1].trimmingCharacters(in: .whitespaces)
+                    break
+                }
+            }
+        }
 
         let tunnelProtocol = NETunnelProviderProtocol()
         tunnelProtocol.providerBundleIdentifier = "com.ple7.vpn.PacketTunnel"
-        tunnelProtocol.serverAddress = config.wireGuard.peers.first?.endpoint ?? "ple7.com"
-
-        // Pass minimal config - full config is in shared keychain
-        tunnelProtocol.providerConfiguration = [
-            "deviceId": config.device.id,
-            "networkId": config.network.id
-        ]
+        tunnelProtocol.serverAddress = serverAddress
+        tunnelProtocol.providerConfiguration = [:]
 
         manager.protocolConfiguration = tunnelProtocol
         manager.localizedDescription = "PLE7 - \(networkName)"
@@ -129,6 +215,7 @@ class VPNManager: ObservableObject {
                     self?.isConnecting = false
                     self?.connectedNetwork = nil
                     self?.connectedNetworkId = nil
+                    self?.currentDevice = nil
                 case .disconnecting:
                     self?.isConnecting = false
                 case .invalid:

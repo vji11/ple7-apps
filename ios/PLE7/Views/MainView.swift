@@ -101,19 +101,29 @@ struct VPNStatusCard: View {
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
+                if let device = vpnManager.currentDevice {
+                    Text(device.ip)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
             }
 
-            // Connect/Disconnect Button
-            Button(action: toggleVPN) {
-                Text(vpnManager.isConnected ? "Disconnect" : "Connect")
-                    .fontWeight(.semibold)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 44)
-                    .background(vpnManager.isConnected ? Color.red : Color.accentColor)
-                    .foregroundColor(.white)
-                    .cornerRadius(12)
+            // Disconnect Button (only shown when connected)
+            if vpnManager.isConnected {
+                Button(action: disconnect) {
+                    Text("Disconnect")
+                        .fontWeight(.semibold)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 44)
+                        .background(Color.red)
+                        .foregroundColor(.white)
+                        .cornerRadius(12)
+                }
+            } else if !vpnManager.isConnecting {
+                Text("Select a network below to connect")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
-            .disabled(vpnManager.isConnecting || vpnManager.selectedDevice == nil)
         }
         .padding()
         .background(Color(.systemGray6))
@@ -150,13 +160,9 @@ struct VPNStatusCard: View {
         }
     }
 
-    private func toggleVPN() {
+    private func disconnect() {
         Task {
-            if vpnManager.isConnected {
-                await vpnManager.disconnect()
-            } else {
-                await vpnManager.connect()
-            }
+            await vpnManager.disconnect()
         }
     }
 }

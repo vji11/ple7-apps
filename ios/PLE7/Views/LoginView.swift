@@ -81,16 +81,22 @@ struct LoginView: View {
 
                     // Google Sign In
                     Button(action: signInWithGoogle) {
-                        HStack {
-                            Image(systemName: "g.circle.fill")
-                                .font(.title2)
+                        HStack(spacing: 12) {
+                            Image("GoogleLogo")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 20, height: 20)
                             Text("Continue with Google")
                                 .fontWeight(.medium)
+                                .foregroundColor(.primary)
                         }
                         .frame(maxWidth: .infinity)
                         .frame(height: 50)
-                        .background(Color(.systemGray6))
-                        .foregroundColor(.primary)
+                        .background(Color(.systemBackground))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color(.systemGray4), lineWidth: 1)
+                        )
                         .cornerRadius(12)
                     }
                     .padding(.horizontal)
@@ -99,10 +105,10 @@ struct LoginView: View {
                     HStack {
                         Text("Don't have an account?")
                             .foregroundColor(.secondary)
-                        Button("Sign Up") {
-                            showingSignUp = true
+                        Button(action: { showingSignUp = true }) {
+                            Text("Sign Up")
+                                .fontWeight(.semibold)
                         }
-                        .fontWeight(.semibold)
                     }
                     .font(.subheadline)
 
@@ -136,8 +142,15 @@ struct LoginView: View {
         Task {
             do {
                 try await authManager.signInWithGoogle()
+            } catch let error as ASWebAuthenticationSessionError {
+                switch error.code {
+                case .canceledLogin:
+                    errorMessage = nil // User cancelled, no error to show
+                default:
+                    errorMessage = "Google sign in failed: \(error.localizedDescription)"
+                }
             } catch {
-                errorMessage = "Google sign in failed. Please try again."
+                errorMessage = "Google sign in failed: \(error.localizedDescription)"
             }
         }
     }

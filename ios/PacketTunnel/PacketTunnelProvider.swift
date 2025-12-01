@@ -13,17 +13,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         // Load WireGuard config from shared keychain
         guard let configData = try? keychain.getData("wireguardConfig"),
-              let wgConfig = try? JSONDecoder().decode(WireGuardConfig.self, from: configData) else {
+              let wgConfig = try? JSONDecoder().decode(WireGuardConfigData.self, from: configData) else {
             logger.error("Failed to load WireGuard config from keychain")
             completionHandler(PacketTunnelError.configurationError)
             return
         }
 
-        // Build WireGuard configuration string
-        let configString = buildWireGuardConfig(from: wgConfig)
-
-        guard let tunnelConfiguration = try? TunnelConfiguration(fromWgQuickConfig: configString) else {
-            logger.error("Failed to parse WireGuard configuration")
+        // Build TunnelConfiguration
+        guard let tunnelConfiguration = buildTunnelConfiguration(from: wgConfig) else {
+            logger.error("Failed to build WireGuard configuration")
             completionHandler(PacketTunnelError.invalidConfiguration)
             return
         }
@@ -73,32 +71,59 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    private func buildWireGuardConfig(from config: WireGuardConfig) -> String {
-        var lines: [String] = []
-
-        // Interface section
-        lines.append("[Interface]")
-        lines.append("PrivateKey = \(config.privateKey)")
-        lines.append("Address = \(config.address)")
-        if let dns = config.dns, !dns.isEmpty {
-            lines.append("DNS = \(dns)")
+    private func buildTunnelConfiguration(from config: WireGuardConfigData) -> TunnelConfiguration? {
+        // Parse private key
+        guard let privateKey = PrivateKey(base64Key: config.privateKey) else {
+            logger.error("Invalid private key")
+            return nil
         }
 
-        // Peer sections
+        // Build interface configuration
+        var interfaceConfig = InterfaceConfiguration(privateKey: privateKey)
+
+        // Parse address
+        if let addressRange = IPAddressRange(from: config.address) {
+            interfaceConfig.addresses = [addressRange]
+        }
+
+        // Parse DNS
+        if let dnsString = config.dns, !dnsString.isEmpty {
+            let dnsServers = dnsString.split(separator: ",").compactMap { dns -> DNSServer? in
+                DNSServer(from: String(dns.trimmingCharacters(in: .whitespaces)))
+            }
+            interfaceConfig.dns = dnsServers
+        }
+
+        // Build peer configurations
+        var peerConfigs: [PeerConfiguration] = []
         for peer in config.peers {
-            lines.append("")
-            lines.append("[Peer]")
-            lines.append("PublicKey = \(peer.publicKey)")
-            lines.append("AllowedIPs = \(peer.allowedIPs)")
-            if let endpoint = peer.endpoint, !endpoint.isEmpty {
-                lines.append("Endpoint = \(endpoint)")
+            guard let publicKey = PublicKey(base64Key: peer.publicKey) else {
+                logger.error("Invalid peer public key")
+                continue
             }
+
+            var peerConfig = PeerConfiguration(publicKey: publicKey)
+
+            // Parse allowed IPs
+            let allowedIPs = peer.allowedIPs.split(separator: ",").compactMap { ip -> IPAddressRange? in
+                IPAddressRange(from: String(ip.trimmingCharacters(in: .whitespaces)))
+            }
+            peerConfig.allowedIPs = allowedIPs
+
+            // Parse endpoint
+            if let endpointString = peer.endpoint, !endpointString.isEmpty {
+                peerConfig.endpoint = Endpoint(from: endpointString)
+            }
+
+            // Persistent keepalive
             if let keepalive = peer.persistentKeepalive, keepalive > 0 {
-                lines.append("PersistentKeepalive = \(keepalive)")
+                peerConfig.persistentKeepAlive = UInt16(keepalive)
             }
+
+            peerConfigs.append(peerConfig)
         }
 
-        return lines.joined(separator: "\n")
+        return TunnelConfiguration(name: "PLE7 VPN", interface: interfaceConfig, peers: peerConfigs)
     }
 }
 
@@ -110,35 +135,7 @@ enum PacketTunnelError: Error {
     case adapterError
 }
 
-// MARK: - WireGuard Config Model (shared with main app)
-
-struct WireGuardConfig: Codable {
-    let privateKey: String
-    let address: String
-    let dns: String?
-    let peers: [WireGuardPeer]
-
-    enum CodingKeys: String, CodingKey {
-        case privateKey = "private_key"
-        case address
-        case dns
-        case peers
-    }
-}
-
-struct WireGuardPeer: Codable {
-    let publicKey: String
-    let allowedIPs: String
-    let endpoint: String?
-    let persistentKeepalive: Int?
-
-    enum CodingKeys: String, CodingKey {
-        case publicKey = "public_key"
-        case allowedIPs = "allowed_ips"
-        case endpoint
-        case persistentKeepalive = "persistent_keepalive"
-    }
-}
+// WireGuardConfigData and WireGuardPeerData are now in Shared/WireGuardTypes.swift
 
 // MARK: - Logger Extension
 

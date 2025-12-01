@@ -1,6 +1,8 @@
 import Foundation
 import KeychainAccess
 
+struct EmptyResponse: Decodable {}
+
 enum APIError: Error {
     case invalidURL
     case invalidResponse
@@ -86,7 +88,7 @@ class APIClient {
         return try await get("/mesh/networks/\(networkId)/devices")
     }
 
-    func getDeviceConfig(deviceId: String) async throws -> DeviceConfig {
+    func getDeviceConfig(deviceId: String) async throws -> DeviceConfigResponse {
         return try await get("/mesh/devices/\(deviceId)/config")
     }
 
@@ -99,6 +101,32 @@ class APIClient {
         return try await post("/mesh/networks/\(networkId)/devices", body: body)
     }
 
+    // MARK: - Auto Register Device
+
+    func autoRegisterDevice(networkId: String, deviceName: String) async throws -> Device {
+        let body: [String: Any] = [
+            "deviceName": deviceName,
+            "platform": "IOS"
+        ]
+        return try await post("/mesh/networks/\(networkId)/auto-register", body: body)
+    }
+
+    // MARK: - Relays
+
+    func getRelays() async throws -> [Relay] {
+        return try await get("/mesh/relays")
+    }
+
+    // MARK: - Exit Node
+
+    func setExitNode(networkId: String, type: ExitNodeType, exitId: String?) async throws {
+        var body: [String: Any] = ["type": type.rawValue]
+        if let exitId = exitId {
+            body["id"] = exitId
+        }
+        let _: EmptyResponse = try await patch("/mesh/networks/\(networkId)/exit-node", body: body)
+    }
+
     // MARK: - HTTP Methods
 
     private func get<T: Decodable>(_ path: String) async throws -> T {
@@ -108,6 +136,12 @@ class APIClient {
 
     private func post<T: Decodable>(_ path: String, body: [String: Any]) async throws -> T {
         var request = try makeRequest(path: path, method: "POST")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return try await execute(request)
+    }
+
+    private func patch<T: Decodable>(_ path: String, body: [String: Any]) async throws -> T {
+        var request = try makeRequest(path: path, method: "PATCH")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return try await execute(request)
     }

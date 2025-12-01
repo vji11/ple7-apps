@@ -49,6 +49,7 @@ class AuthManager: NSObject, ObservableObject {
     }
 
     func signInWithGoogle() async throws {
+        // Use the mobile Google auth endpoint
         let authURL = URL(string: "https://ple7.com/api/auth/google/mobile")!
         let callbackScheme = "ple7"
 

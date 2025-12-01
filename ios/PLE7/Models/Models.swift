@@ -45,7 +45,7 @@ struct Device: Identifiable, Codable, Hashable {
     enum CodingKeys: String, CodingKey {
         case id
         case name
-        case ip
+        case ip = "ip_address"
         case platform
         case publicKey = "public_key"
         case isExitNode = "is_exit_node"
@@ -126,31 +126,80 @@ struct WireGuardPeer: Codable {
     }
 }
 
-struct DeviceConfig: Codable {
-    let device: Device
-    let network: NetworkInfo
-    let wireGuard: WireGuardConfig
-
-    struct NetworkInfo: Codable {
-        let id: String
-        let name: String
-        let ipRange: String
-
-        enum CodingKeys: String, CodingKey {
-            case id
-            case name
-            case ipRange = "ip_range"
-        }
-    }
+/// Response from /api/mesh/devices/:id/config
+struct DeviceConfigResponse: Codable {
+    let config: String  // WireGuard INI-style config string
+    let hasPrivateKey: Bool
+    let relay: Relay?
 
     enum CodingKeys: String, CodingKey {
-        case device
-        case network
-        case wireGuard = "wireguard"
+        case config
+        case hasPrivateKey
+        case relay
     }
 }
 
 struct APIErrorResponse: Codable {
     let message: String
     let statusCode: Int?
+}
+
+// MARK: - Relay (PLE7 Infrastructure Exit Nodes)
+
+struct Relay: Identifiable, Codable, Hashable {
+    let id: String
+    let name: String
+    let location: String
+    let countryCode: String
+    let publicEndpoint: String
+    let status: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case location
+        case countryCode = "country_code"
+        case publicEndpoint = "public_endpoint"
+        case status
+    }
+
+    var isOnline: Bool {
+        status == "online" || status == "ONLINE"
+    }
+
+    var flagEmoji: String {
+        let base: UInt32 = 127397
+        var emoji = ""
+        for scalar in countryCode.uppercased().unicodeScalars {
+            if let flag = UnicodeScalar(base + scalar.value) {
+                emoji.append(String(flag))
+            }
+        }
+        return emoji
+    }
+}
+
+// MARK: - Exit Node Selection
+
+enum ExitNodeType: String, Codable {
+    case none
+    case relay
+    case device
+}
+
+struct ExitNodeSelection: Codable {
+    let type: ExitNodeType
+    let id: String?
+}
+
+// MARK: - Auto Register Response
+
+struct AutoRegisterResponse: Codable {
+    let device: Device
+    let config: String?
+
+    enum CodingKeys: String, CodingKey {
+        case device
+        case config
+    }
 }
