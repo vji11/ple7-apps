@@ -119,12 +119,30 @@ class APIClient {
 
     // MARK: - Exit Node
 
+    func getExitNode(networkId: String) async throws -> ExitNodeConfig {
+        return try await get("/mesh/networks/\(networkId)/exit-node")
+    }
+
+    func setExitNode(networkId: String, exitType: String, relayId: String?) async throws -> ExitNodeConfig {
+        var body: [String: Any] = ["exit_type": exitType]
+        if let relayId = relayId {
+            body["exit_relay_id"] = relayId
+        }
+        return try await patch("/mesh/networks/\(networkId)/exit-node", body: body)
+    }
+
     func setExitNode(networkId: String, type: ExitNodeType, exitId: String?) async throws {
         var body: [String: Any] = ["type": type.rawValue]
         if let exitId = exitId {
             body["id"] = exitId
         }
         let _: EmptyResponse = try await patch("/mesh/networks/\(networkId)/exit-node", body: body)
+    }
+
+    // MARK: - User
+
+    func getUser() async throws -> User {
+        return try await get("/auth/me")
     }
 
     // MARK: - HTTP Methods

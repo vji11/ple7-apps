@@ -192,6 +192,20 @@ struct ExitNodeSelection: Codable {
     let id: String?
 }
 
+struct ExitNodeConfig: Codable {
+    let exitType: String
+    let exitRelayId: String?
+    let exitDeviceId: String?
+    let relay: Relay?
+
+    enum CodingKeys: String, CodingKey {
+        case exitType = "exit_type"
+        case exitRelayId = "exit_relay_id"
+        case exitDeviceId = "exit_device_id"
+        case relay
+    }
+}
+
 // MARK: - Auto Register Response
 
 struct AutoRegisterResponse: Codable {
