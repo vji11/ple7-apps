@@ -18,10 +18,15 @@ ios/
 ├── PLE7/                    # Main app target
 │   ├── App/PLE7App.swift    # App entry point
 │   ├── Views/               # SwiftUI views
-│   │   ├── ContentView.swift
-│   │   ├── LoginView.swift
-│   │   ├── MainView.swift
-│   │   └── NetworkDetailView.swift
+│   │   ├── ContentView.swift       # Root view (auth routing)
+│   │   ├── LoginView.swift         # Login/Register screen
+│   │   ├── MainTabView.swift       # Tab navigation container
+│   │   ├── HomeView.swift          # VPN connection screen
+│   │   ├── DashboardView.swift     # Devices list
+│   │   ├── TopologyView.swift      # Network topology visualization
+│   │   ├── AccountView.swift       # User account & settings
+│   │   ├── MainView.swift          # (Legacy - replaced by MainTabView)
+│   │   └── NetworkDetailView.swift # (Legacy network detail sheet)
 │   ├── ViewModels/
 │   │   └── NetworksViewModel.swift
 │   ├── Services/
@@ -55,10 +60,33 @@ rm -rf ~/Library/Developer/Xcode/DerivedData/PLE7-*
 ## Architecture
 
 ### Main App
-- **SwiftUI** for UI
+- **SwiftUI** for UI with **TabView** navigation
+- **AppState**: Centralized state management for networks, devices, relays
 - **AuthManager**: Handles login/logout, token storage in Keychain
 - **VPNManager**: Controls VPN via NEVPNManager, stores config in shared Keychain
 - **APIClient**: REST API communication with backend
+
+### Tab Navigation Structure
+```
+MainTabView
+├── HomeView (VPN tab)
+│   ├── VPNStatusSection
+│   ├── NetworkSelectionSection
+│   └── RelaySelectionSection
+├── DashboardView (Dashboard tab)
+│   ├── NetworkHeaderCard
+│   └── DeviceCards
+├── TopologyView (Topology tab)
+│   ├── Internet node
+│   ├── Relay node
+│   ├── This device node
+│   └── Other devices
+└── AccountView (Account tab)
+    ├── ProfileCard
+    ├── PlanCard
+    ├── StatisticsCard
+    └── SettingsSection
+```
 
 ### PacketTunnel Extension
 - **NEPacketTunnelProvider** subclass
@@ -102,6 +130,11 @@ GET  /api/mesh/networks                    - List networks
 GET  /api/mesh/networks/:id/devices        - List devices in network
 GET  /api/mesh/devices/:id/config          - Get WireGuard config for device
 POST /api/mesh/networks/:id/devices        - Register new device
+POST /api/mesh/networks/:id/auto-register  - Auto register iOS device
+
+GET  /api/mesh/relays                      - List available relays
+GET  /api/mesh/networks/:id/exit-node      - Get current exit node config
+PATCH /api/mesh/networks/:id/exit-node     - Set exit node (relay or device)
 ```
 
 ## Models
@@ -110,8 +143,10 @@ POST /api/mesh/networks/:id/devices        - Register new device
 Network: id, name, description, ipRange, deviceCount
 Device: id, name, ip, platform, publicKey, isExitNode, networkId
 User: id, email, plan, emailVerified
-WireGuardConfig: privateKey, address, dns, peers[]
-WireGuardPeer: publicKey, allowedIPs, endpoint, persistentKeepalive
+Relay: id, name, location, countryCode, publicEndpoint, status
+ExitNodeConfig: exitType, exitRelayId, exitDeviceId, relay
+ExitNodeType: none, relay, device
+DeviceConfigResponse: config (WireGuard INI string), hasPrivateKey, relay
 ```
 
 ## Dependencies (via Swift Package Manager)
@@ -136,13 +171,13 @@ WireGuardPeer: publicKey, allowedIPs, endpoint, persistentKeepalive
 
 ### Add a new View
 1. Create SwiftUI view in `PLE7/Views/`
-2. Add navigation from parent view
-3. Use `@EnvironmentObject` for AuthManager/VPNManager access
+2. Add to appropriate tab in `MainTabView.swift`
+3. Use `@EnvironmentObject` for AppState/AuthManager/VPNManager access
 
 ### Add API endpoint
 1. Add method to `APIClient.swift`
 2. Add response model to `Models.swift` if needed
-3. Call from ViewModel or Service
+3. Call from AppState or ViewModel
 
 ### Modify WireGuard config handling
 1. Update `WireGuardConfig` model in both:
@@ -172,9 +207,35 @@ WireGuardPeer: publicKey, allowedIPs, endpoint, persistentKeepalive
 
 - ✅ Project structure created
 - ✅ SwiftUI views (Login, Main, NetworkDetail)
-- ✅ API client with auth
+- ✅ Tab navigation with 4 tabs (VPN, Dashboard, Topology, Account)
+- ✅ Network selector dropdown
+- ✅ Relay/exit location selector
+- ✅ Devices list in Dashboard
+- ✅ Network topology visualization
+- ✅ Account view with plan info
+- ✅ API client with auth + relay endpoints
 - ✅ VPN manager with NEVPNManager
 - ✅ PacketTunnel extension with WireGuardKit
 - ⏳ Testing on device
 - ⏳ App icon
 - ⏳ App Store submission
+
+## Latest Changes (2025-12-05)
+
+### UI Redesign
+- Replaced half-grey/half-white screen with full white background
+- Added bottom TabView navigation with 4 tabs
+- Network selection moved to dropdown picker
+- Relay selection added below network picker
+- New TopologyView showing visual network diagram
+- New AccountView with user info, plan, settings
+
+### Files Added/Modified
+- `MainTabView.swift` - New tab navigation container
+- `HomeView.swift` - New VPN connection screen
+- `DashboardView.swift` - New devices list view
+- `TopologyView.swift` - New topology visualization
+- `AccountView.swift` - New account/settings view
+- `ContentView.swift` - Updated to use MainTabView
+- `Models.swift` - Added Relay, ExitNodeConfig, ExitNodeType models
+- `APIClient.swift` - Added relay and exit node API methods
